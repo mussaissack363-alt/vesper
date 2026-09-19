@@ -1,0 +1,2120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>Vesper</title>
+<style>
+  :root {
+    --bg: #0a0612;
+    --panel: #150e22;
+    --panel-alt: #1c1330;
+    --purple: #a78bfa;
+    --purple-bright: #c4b5fd;
+    --purple-dim: #6d5b9e;
+    --text: #e9e4f7;
+    --text-dim: #9c92b8;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif; overflow: hidden;
+  }
+  #app { position: relative; height: 100vh; }
+
+  /* ── background layer: full-screen avatar ── */
+  #orb-wrap {
+    position: absolute; inset: 0; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #2b1f15 0%, #0e0a07 78%);
+  }
+  /* dim the avatar with a plain overlay while chatting — CSS blur()/brightness
+     over a WebGL canvas triggers context loss & compositor glitches on some
+     machines (model silently vanishes while the JS loop keeps running) */
+  #orb-wrap::after {
+    content: ''; position: absolute; inset: 0; background: #0e0a07;
+    opacity: 0; transition: opacity 0.5s ease; pointer-events: none; z-index: 1;
+  }
+  #app.display #orb-wrap::after { opacity: 0.62; }
+  #orb-canvas { width: 100%; height: 100%; display: block; }
+  #status-label {
+    position: absolute; bottom: 100px; left: 0; right: 0; text-align: center;
+    z-index: 2;
+    font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+    color: #a08a72;
+    pointer-events: none; text-shadow: 0 1px 4px rgba(14,10,7,0.9);
+  }
+
+  /* ── foreground layer: floating glass cards ── */
+  #chat-log {
+    position: absolute; inset: 24px 24px 112px 24px; z-index: 2;
+    overflow-y: auto; overflow-x: hidden;
+    display: flex; flex-direction: column; gap: 14px;
+    padding: 12px 4px; pointer-events: none;
+    opacity: 0; transition: opacity 0.35s ease;
+  }
+  #app.display #chat-log { opacity: 1; }
+  .msg {
+    max-width: min(520px, 78%); padding: 12px 16px; border-radius: 16px;
+    line-height: 1.5; font-size: 14.5px;
+    pointer-events: auto; cursor: default;
+    background: rgba(15, 15, 25, 0.6);
+    /* backdrop-filter removed: live blur over WebGL destabilizes the
+       compositor on this machine — the rgba fill keeps the glass look */
+    border: 1px solid rgba(167, 139, 250, 0.25);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.45), 0 0 18px rgba(167,139,250,0.08);
+    opacity: 0; transform: translateY(20px);
+    animation: card-in 0.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+  .msg.leaving { animation: card-out 0.35s ease-in forwards; pointer-events: none; }
+  @keyframes card-in {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes card-out {
+    from { opacity: 1; transform: translateY(0); }
+    to   { opacity: 0; transform: translateY(-24px) scale(0.98); }
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: linear-gradient(135deg, rgba(124,92,214,0.75), rgba(155,127,232,0.65));
+    border-color: rgba(196, 181, 253, 0.35);
+    color: #fff;
+  }
+  .msg.vesper {
+    align-self: flex-start;
+    background: rgba(15, 15, 25, 0.6);
+  }
+
+  /* clear chip — appears while cards are on screen */
+  #cards-clear {
+    position: absolute; top: 18px; right: 22px; z-index: 3;
+    font-size: 12px; letter-spacing: 1px; color: var(--text-dim);
+    background: rgba(15,15,25,0.55); border: 1px solid rgba(167,139,250,0.3);
+    border-radius: 999px; padding: 6px 14px; cursor: pointer;
+    opacity: 0; pointer-events: none; transform: translateY(-8px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+  #app.display #cards-clear { opacity: 1; pointer-events: auto; transform: translateY(0); }
+  #cards-clear:hover { color: var(--purple-bright); border-color: var(--purple); }
+
+  /* ── floating command bar ── */
+  #input-bar {
+    position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 3;
+    display: flex; align-items: center; gap: 8px;
+    width: min(760px, calc(100% - 32px));
+    padding: 10px 14px;
+    background: rgba(15, 15, 25, 0.78);
+    border: 1px solid rgba(167, 139, 250, 0.28);
+    border-radius: 28px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5), 0 0 24px rgba(167,139,250,0.1);
+  }
+  #input-bar input[type="text"] {
+    flex: 1; background: rgba(28, 19, 48, 0.55); border: 1px solid #33254e;
+    color: var(--text); padding: 12px 14px; border-radius: 22px; font-size: 14.5px; outline: none;
+  }
+  #input-bar input[type="text"]:focus { border-color: var(--purple); }
+
+  .icon-btn {
+    width: 40px; height: 40px; border-radius: 50%; border: 1px solid #33254e;
+    background: var(--panel-alt); color: var(--purple); font-size: 16px;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    flex-shrink: 0; transition: background 0.15s, border-color 0.15s;
+  }
+  .icon-btn:hover { background: #2a1f42; }
+  .icon-btn.disabled { opacity: 0.35; cursor: not-allowed; }
+  .icon-btn.disabled:hover { background: var(--panel-alt); }
+  .icon-btn.listening { border-color: var(--purple); background: #3a2a5e; animation: pulse-btn 1.2s infinite; }
+  @keyframes pulse-btn { 0%,100% { box-shadow: 0 0 0 0 rgba(167,139,250,0.5); } 50% { box-shadow: 0 0 0 6px rgba(167,139,250,0); } }
+
+  #send-btn {
+    background: linear-gradient(135deg, #7c5cd6, #9b7fe8); border: none;
+    width: 44px; height: 44px; border-radius: 50%; color: #fff; font-size: 18px;
+    display: flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0;
+  }
+
+  #file-input { display: none; }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #33254e; border-radius: 3px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three.module.js?v=3",
+    "three/addons/loaders/GLTFLoader.js": "/vendor/GLTFLoader.js?v=3",
+    "../utils/BufferGeometryUtils.js": "/utils/BufferGeometryUtils.js?v=3",
+    "@pixiv/three-vrm": "/vendor/VRMLoaderPlugin.js?v=3"
+  }
+}
+</script>
+<script>
+  // diagnostic logger: mirrors errors to the status label AND back to the server
+  window.__vlog = function (msg, detail) {
+    try { console.log('[vesper]', msg, detail || ''); } catch (e) {}
+    try {
+      const el = document.getElementById('status-label');
+      if (el && msg) el.textContent = msg;
+    } catch (e) {}
+    try {
+      fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ msg: String(msg).slice(0, 300), detail: String(detail || '').slice(0, 600) })
+      }).catch(() => {});
+    } catch (e) {}
+  };
+  window.addEventListener('error', (e) => {
+    if (e.message) window.__vlog('window error: ' + e.message, (e.filename || '') + ':' + (e.lineno || ''));
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    if (e.reason) window.__vlog('unhandled rejection', e.reason.message || String(e.reason));
+  });
+  // mirror WebGL/three console noise into the server log (shader failures warn, not throw)
+  const __origWarn = console.warn, __origError = console.error;
+  console.warn = function (...args) {
+    try { window.__vlog('console.warn', args.map(a => (typeof a === 'string' ? a : (a && a.message) || String(a))).join(' ')); } catch (e) {}
+    return __origWarn.apply(this, args);
+  };
+  console.error = function (...args) {
+    try { window.__vlog('console.error', args.map(a => (typeof a === 'string' ? a : (a && a.message) || String(a))).join(' ')); } catch (e) {}
+    return __origError.apply(this, args);
+  };
+  window.__vlog('page loaded', location.href);
+</script>
+</head>
+<body>
+<div id="app">
+
+  <div id="orb-wrap">
+    <canvas id="orb-canvas"></canvas>
+    <div id="status-label">idle</div>
+  </div>
+
+  <div id="chat-log"></div>
+  <div id="cards-clear" title="Clear view (Esc)">✕ clear</div>
+
+  <div id="input-bar">
+    <div class="icon-btn" id="upload-btn" title="Send image or file">📎</div>
+    <input type="file" id="file-input">
+    <div class="icon-btn" id="save-btn" title="Save chat">💾</div>
+    <div class="icon-btn" id="mic-btn" title="Voice input">🎙</div>
+    <div class="icon-btn" id="voice-btn" title="Change Vesper's voice">🗣</div>
+    <div class="icon-btn" id="mute-btn" title="Mute Vesper's voice">🔊</div>
+    <input type="text" id="msg-input" placeholder="Message Vesper...">
+    <div id="send-btn" title="Send">➤</div>
+  </div>
+
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+window.__vlog('module imports ok');
+
+// ══════════════════════════════════════════
+// 3D AVATAR — ella.vrm
+// ══════════════════════════════════════════
+let canvas = document.getElementById('orb-canvas');   // reboot swaps in a fresh element
+const statusLabel = document.getElementById('status-label');
+let renderer = null, scene = null, camera = null, vrm = null;
+let faceMeshes = [];        // meshes that carry morph targets (for direct morph drive)
+let expressionManager = null;
+let clock = new THREE.Clock();
+
+let avatarState = 'idle';   // idle | listening | thinking | speaking
+let stateEnergy = 0.15;     // smoothed motion amplitude 0..1
+
+// visibility auto-heal: if the model loads but renders nothing, diagnose + swap materials
+let visCheckAt = 0;         // timestamp for the pending pixel check (0 = none)
+let visCheckDone = false;
+
+// ── CPU STATUE RE-BAKE — full body animation without GPU skinning ──
+// GPU skinning draws nothing on this machine (57k tris, 0% pixels), but the
+// baked statue renders fine. So: keep driving the hidden skeleton every frame
+// (breathing, gestures, springs all run as normal), then skin the statue's
+// vertices on the CPU from the current bone matrices. Same math the GPU would
+// do — world = Σ wₖ · (boneWorldₖ · boneInverseₖ) · bindWorld.
+let statueRigs = null;        // [{ src, baked, pw, nw, count, skinIndex, skinWeight, morphAttrs }]
+let rebakeSkip = 0;           // adaptive: skip every other frame when CPU cost is high
+let rebakeFrameToggle = 0;
+let rebakeMs = 0, rebakeLoggedAt = 0;
+let rebakeNanLoggedAt = 0;
+
+function buildStatueRigs(skinned) {
+  statueRigs = [];
+  vrm.scene.updateMatrixWorld(true);
+  const v = new THREE.Vector3();
+  for (const o of skinned) {
+    const g = o.geometry;
+    if (!g.attributes.skinIndex || !g.attributes.skinWeight) { window.__vlog('statue rig skipped (no skin attrs)', o.name || 'mesh'); continue; }
+    let baked = null;
+    const wantName = (o.name || 'mesh') + '_statue';
+    vrm.scene.traverse((m) => { if (!baked && m.isMesh && m.visible && m.name === wantName) baked = m; });
+    if (!baked) { window.__vlog('statue rig: clone not found', wantName); continue; }
+    // pre-transform bind data into world space once — per-frame cost is then
+    // just the 4 bone influences per vertex
+    const pos = g.attributes.position.array;
+    const M = o.matrixWorld;
+    const pw = new Float32Array(pos.length);
+    for (let i = 0; i < pos.length; i += 3) {
+      v.set(pos[i], pos[i + 1], pos[i + 2]).applyMatrix4(M);
+      pw[i] = v.x; pw[i + 1] = v.y; pw[i + 2] = v.z;
+    }
+    let nw = null;
+    if (g.attributes.normal) {
+      const nor = g.attributes.normal.array;
+      nw = new Float32Array(nor.length);
+      const nM = new THREE.Matrix3().getNormalMatrix(M);
+      for (let i = 0; i < nor.length; i += 3) {
+        v.set(nor[i], nor[i + 1], nor[i + 2]).applyMatrix3(nM);
+        nw[i] = v.x; nw[i + 1] = v.y; nw[i + 2] = v.z;
+      }
+    }
+    try {
+      baked.geometry.attributes.position.setUsage(THREE.DynamicDrawUsage);
+      if (baked.geometry.attributes.normal) baked.geometry.attributes.normal.setUsage(THREE.DynamicDrawUsage);
+    } catch (e) { /* older three: setUsage may be missing */ }
+    const morphAttrs = (g.morphAttributes && g.morphAttributes.position) ? g.morphAttributes.position : null;
+    statueRigs.push({ src: o, baked, pw, nw, count: g.attributes.position.count,
+                      skinIndex: g.attributes.skinIndex.array, skinWeight: g.attributes.skinWeight.array, morphAttrs });
+    window.__vlog('statue rig', `${o.name || 'mesh'} verts=${g.attributes.position.count} morphs=${morphAttrs ? morphAttrs.length : 0}`);
+  }
+  window.__vlog('statue rigs ready', `meshes=${statueRigs.length}`);
+}
+
+function rebakeStatues() {
+  if (!statueRigs || !statueRigs.length) return;
+  if (rebakeMs > 9) {                      // adaptive frame skip when CPU-bound
+    rebakeFrameToggle ^= 1;
+    if (rebakeFrameToggle) return;
+  }
+  const t0 = performance.now();
+  vrm.scene.updateMatrixWorld(true);       // bones (incl. spring-bone hair) are final here
+  const v = new THREE.Vector3();
+  for (const rig of statueRigs) {
+    const sk = rig.src.skeleton;
+    sk.update();                           // boneMatrices[i] = boneWorld[i] · boneInverse[i]
+    const bm = sk.boneMatrices;
+    const si = rig.skinIndex, sw = rig.skinWeight;
+    const out = rig.baked.geometry.attributes.position.array;
+    const outN = rig.nw && rig.baked.geometry.attributes.normal ? rig.baked.geometry.attributes.normal.array : null;
+    const n = rig.count;
+    // morph accumulation in bind space, from the LIVE mesh's influences
+    let mp = null;
+    if (rig.morphAttrs && rig.src.morphTargetInfluences) {
+      const infl = rig.src.morphTargetInfluences;
+      let any = false;
+      for (let m = 0; m < infl.length && m < rig.morphAttrs.length; m++) {
+        const w = infl[m];
+        if (w < 0.004) continue;
+        const d = rig.morphAttrs[m].array;
+        if (!mp) mp = new Float32Array(n * 3);
+        for (let i = 0; i < n * 3; i++) mp[i] += w * d[i];
+        any = true;
+      }
+      if (!any) mp = null;
+    }
+    let nanHit = false;
+    for (let vtx = 0, i3 = 0, i4 = 0; vtx < n; vtx++, i3 += 3, i4 += 4) {
+      let x = rig.pw[i3], y = rig.pw[i3 + 1], z = rig.pw[i3 + 2];
+      if (mp) { x += mp[i3]; y += mp[i3 + 1]; z += mp[i3 + 2]; }
+      let ox = 0, oy = 0, oz = 0, onx = 0, ony = 0, onz = 0;
+      for (let k = 0; k < 4; k++) {
+        const w = sw[i4 + k];
+        if (!w) continue;
+        const b = si[i4 + k] * 16;
+        ox += w * (bm[b] * x + bm[b + 4] * y + bm[b + 8] * z + bm[b + 12]);
+        oy += w * (bm[b + 1] * x + bm[b + 5] * y + bm[b + 9] * z + bm[b + 13]);
+        oz += w * (bm[b + 2] * x + bm[b + 6] * y + bm[b + 10] * z + bm[b + 14]);
+        if (outN) {
+          const nx = rig.nw[i3], ny = rig.nw[i3 + 1], nz = rig.nw[i3 + 2];
+          onx += w * (bm[b] * nx + bm[b + 4] * ny + bm[b + 8] * nz);
+          ony += w * (bm[b + 1] * nx + bm[b + 5] * ny + bm[b + 9] * nz);
+          onz += w * (bm[b + 2] * nx + bm[b + 6] * ny + bm[b + 10] * nz);
+        }
+      }
+      // NaN guard: NaN bone matrices skinned into vertex buffers hard-fault
+      // fragile drivers → context loss. Freeze this rig at bind pose instead.
+      // sample every 512th vertex (incl. 0) — catches NaNs anywhere in the
+      // buffer at negligible cost; a persistent NaN bone hits a sample fast
+      if ((vtx & 511) === 0 && !isFinite(ox + oy + oz)) { nanHit = true; break; }
+      out[i3] = ox; out[i3 + 1] = oy; out[i3 + 2] = oz;
+      if (outN) { outN[i3] = onx; outN[i3 + 1] = ony; outN[i3 + 2] = onz; }
+    }
+    if (nanHit) {
+      out.set(rig.pw);
+      if (outN) outN.set(rig.nw);
+      rig.baked.geometry.attributes.position.needsUpdate = true;
+      if (outN) rig.baked.geometry.attributes.normal.needsUpdate = true;
+      const tn = performance.now();
+      if (tn - rebakeNanLoggedAt > 5000) {
+        rebakeNanLoggedAt = tn;
+        window.__vlog('cpu re-bake: NaN bones', `${rig.src.name || 'mesh'} frozen at bind pose this frame`);
+      }
+      continue;
+    }
+    rig.baked.geometry.attributes.position.needsUpdate = true;
+    if (outN) rig.baked.geometry.attributes.normal.needsUpdate = true;
+  }
+  rebakeMs = performance.now() - t0;
+  if (performance.now() - rebakeLoggedAt > 4000) {
+    rebakeLoggedAt = performance.now();
+    window.__vlog('cpu re-bake', `${rebakeMs.toFixed(1)}ms / frame`);
+  }
+}
+
+// ── WATCHDOG v2 — verify pixels with minimal GL disruption. ──
+// Lessons from the logs: a full-canvas readPixels (4MB sync stall) every 15s
+// correlates with context losses on this fragile driver (TDR), and frequent
+// canvas-swap reboots churn GL contexts toward the browser's ~16-context cap.
+// v2: (1) check isContextLost() first — only that path reboots; (2) probe via
+// a tiny 64×64 offscreen target — no pipeline-stalling sync; (3) require 3
+// consecutive dead probes before one cooldown-protected canvas swap.
+let nextWatchdogAt = 25000;
+let watchdogFailures = 0;
+let lastRebootAt = 0;
+let watchdogRT = null;
+let watchdogRTBuf = null;
+let contextCount = 0;
+
+function watchdogTick(now) {
+  if (now < nextWatchdogAt || !vrm || !renderer) return;
+  nextWatchdogAt = now + 15000;
+  const gl = renderer.getContext();
+
+  // 1) real context loss — the only unambiguous reboot trigger
+  if (gl.isContextLost()) {
+    window.__vlog('watchdog: CONTEXT LOST', `rebooting (context #${contextCount})`);
+    rebootAvatar('WebGL context is lost');
+    return;
+  }
+
+  // 2) tiny offscreen probe — 64×64 render target, near-zero sync cost
+  try {
+    if (!watchdogRT || watchdogRT.width !== 64) {
+      if (watchdogRT) watchdogRT.dispose();
+      watchdogRT = new THREE.WebGLRenderTarget(64, 64);
+      watchdogRTBuf = new Uint8Array(64 * 64 * 4);
+    }
+    renderer.setRenderTarget(watchdogRT);
+    renderer.render(scene, camera);
+    renderer.readRenderTargetPixels(watchdogRT, 0, 0, 64, 64, watchdogRTBuf);
+    renderer.setRenderTarget(null);
+    let opaque = 0;
+    for (let i = 3; i < watchdogRTBuf.length; i += 4) if (watchdogRTBuf[i] > 200) opaque++;
+    const frac = opaque / (64 * 64);
+    if (frac > 0.02) {
+      if (watchdogFailures) window.__vlog('watchdog: recovered', `${watchdogFailures} failed probes before this one`);
+      watchdogFailures = 0;
+      return;   // context alive and drawing
+    }
+  } catch (e) {
+    window.__vlog('watchdog probe error', e && e.message);
+  }
+
+  // 3) dead pixels on a live context — compositing glitch; wait for 3 strikes
+  watchdogFailures++;
+  window.__vlog('watchdog: no solid pixels', `strike ${watchdogFailures}/3`);
+  if (watchdogFailures >= 3) {
+    watchdogFailures = 0;
+    if (window.__vesperStatue) {
+      rebootAvatar('3 consecutive dead probes on a live context');
+    } else {
+      window.__vlog('watchdog: live model invisible', 're-arming heal cascade');
+      visCheckDone = false;
+      visCheckAt = performance.now() + 800;
+    }
+  }
+}
+
+// last-resort recovery: tear the avatar down and rebuild it from scratch
+function rebootAvatar(reason) {
+  const now = performance.now();
+  if (lastRebootAt && now - lastRebootAt < 60000) { window.__vlog('reboot skipped (cooldown)', reason); return; }
+  lastRebootAt = now;
+  window.__vlog('AVATAR REBOOT', reason);
+  try { if (vrm) VRMUtils.deepDispose(vrm.scene); } catch (e) {}
+  if (scene) { while (scene.children.length) scene.remove(scene.children[0]); }
+  statueRigs = null;
+  window.__vesperStatue = false;
+  faceMeshes.length = 0;
+  expressionManager = null;
+  visCheckDone = false;
+  statusLabel.textContent = 'rebooting avatar…';
+  try { renderer.forceContextLoss(); } catch (e) {}
+  try { renderer.dispose(); } catch (e) {}
+  renderer = null; scene = null; camera = null; vrm = null;
+  // swap in a brand-new canvas element: guaranteed pristine GL context,
+  // immune to poisoned driver state on the dead one
+  const fresh = document.createElement('canvas');
+  fresh.id = 'orb-canvas';
+  canvas.replaceWith(fresh);
+  canvas = fresh;
+  setTimeout(() => {
+    try { initAvatar(); } catch (e) { window.__vlog('reboot initAvatar failed', e && e.message); }
+  }, 150);
+}
+
+function countOpaque(px) {
+  let n = 0;
+  for (let i = 3; i < px.length; i += 4) if (px[i] > 8) n++;
+  return n;
+}
+
+function checkVisibility(now) {
+  if (!visCheckAt || now < visCheckAt || !renderer || !scene || !camera || !vrm) return;
+  visCheckAt = 0;
+  const gl = renderer.getContext();
+  const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+  if (!w || !h) {
+    window.__vlog('ZERO-SIZE DRAWING BUFFER', `cssCanvas=${canvas.clientWidth}x${canvas.clientHeight} cssWrap=${canvas.parentElement.clientWidth}x${canvas.parentElement.clientHeight}`);
+    return;
+  }
+
+  // scan the skeleton for NaN transforms (NaN bones = nothing skinned can rasterize)
+  const nanBones = [];
+  try {
+    if (vrm.humanoid) {
+      for (const b of ['hips', 'spine', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm']) {
+        const bn = vrm.humanoid.getNormalizedBoneNode(b);
+        if (!bn) continue;
+        bn.updateWorldMatrix(true, false);
+        if (!isFinite(bn.matrixWorld.elements.reduce((s, x) => s + x, 0))) nanBones.push(b);
+      }
+    }
+  } catch (e) { nanBones.push('scan-error:' + e.message); }
+
+  // deep scan: raw (non-normalized) bone + bind-matrix NaNs — NaN skin math rasters nothing
+  let badRaw = 0, badBind = 0, meshCount = 0, invisible = 0, badMorph = 0;
+  let boneDump = '';
+  vrm.scene.updateMatrixWorld(true);
+  vrm.scene.traverse((o) => {
+    if (!(o.isMesh || o.isSkinnedMesh)) return;
+    meshCount++;
+    if (!o.visible) invisible++;
+    if (o.morphTargetInfluences && o.morphTargetInfluences.some((v) => !isFinite(v))) badMorph++;
+    if (o.isSkinnedMesh && o.skeleton) {
+      for (const b of o.skeleton.bones) {
+        if (!isFinite(b.matrixWorld.elements.reduce((s, x) => s + x, 0))) badRaw++;
+        if (!boneDump) boneDump = `${o.name || 'mesh'}:${b.name || 'bone'} pos=(${b.position.toArray().map((v) => v.toFixed(3)).join(',')})`;
+      }
+      if (o.skeleton.boneMatrices) {
+        for (const x of o.skeleton.boneMatrices) if (!isFinite(x)) { badBind++; break; }
+      }
+    }
+  });
+
+  // full-buffer render + readback
+  renderer.render(scene, camera);
+  const px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  const frac = countOpaque(px) / (w * h);
+  window.__vlog('visibility probe', `buffer=${w}x${h} cssCanvas=${canvas.clientWidth}x${canvas.clientHeight} opaque=${(frac * 100).toFixed(2)}% nanBones=${nanBones.join('+') || 'none'}`);
+  window.__vlog('mesh scan', `meshes=${meshCount} invisible=${invisible} badMorph=${badMorph} nanRawBones=${badRaw} nanBind=${badBind} firstBone=${boneDump || 'n/a'}`);
+  window.__vlog('render stats', `calls=${renderer.info.render.calls} tris=${renderer.info.render.triangles} programs=${renderer.info.programs ? renderer.info.programs.length : '?'}`);
+
+  if (frac > 0.005 || visCheckDone) return;   // visible, or already healed once
+
+  // control: can this canvas draw and read back AT ALL? big red quad right in front of the camera
+  try {
+    const ctrl = new THREE.Scene();
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(3, 3), new THREE.MeshBasicMaterial({ color: 0xff2222, side: THREE.DoubleSide }));
+    quad.position.copy(camera.position).add(new THREE.Vector3(0, 0, -0.5).applyQuaternion(camera.quaternion));
+    quad.quaternion.copy(camera.quaternion);
+    ctrl.add(quad);
+    const ccam = camera.clone();
+    ccam.near = 0.01; ccam.far = 10; ccam.aspect = camera.aspect; ccam.updateProjectionMatrix();
+    renderer.render(ctrl, ccam);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const cfrac = countOpaque(px) / (w * h);
+    window.__vlog('control quad probe', (cfrac * 100).toFixed(1) + '% red pixels');
+    if (cfrac < 0.3) {
+      window.__vlog('CANVAS/READBACK BROKEN — even the control quad is invisible');
+      visCheckDone = true;
+      return;
+    }
+  } catch (e) { window.__vlog('control probe failed', e && e.message); }
+
+  // pipeline works → heal. escalate: pose reset → skinning bypass → texture-independent materials
+  let frac2 = frac;
+
+  // tier 1: humanoid pose can be broken — reset to a known-good rest pose
+  try {
+    if (vrm.humanoid && vrm.humanoid.resetNormalizedPose) vrm.humanoid.resetNormalizedPose();
+    vrm.scene.updateMatrixWorld(true);
+    renderer.render(scene, camera);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    frac2 = countOpaque(px) / (w * h);
+    window.__vlog('heal tier 1: pose reset', (frac2 * 100).toFixed(2) + '% pixels');
+    if (frac2 > 0.005) { visCheckDone = true; return; }
+  } catch (e) { window.__vlog('heal tier 1 failed', e && e.message); }
+
+  // tier 2: broken skinning — freeze a static baked copy of every skinned mesh
+  try {
+    if (window.__vesperStatue && statueRigs && statueRigs.length) {
+      window.__vlog('heal tier 2: statue already active — skipping duplicate bake', '');
+      visCheckDone = true;
+      return;
+    }
+    let frozen = 0;
+    const skinned = [];
+    vrm.scene.traverse((o) => { if (o.isSkinnedMesh) skinned.push(o); });          for (const o of skinned) {
+            o.updateMatrixWorld(true);
+            const baked = new THREE.Mesh(o.geometry.clone(), o.material);
+            baked.applyMatrix4(o.matrixWorld);   // bind-pose statue (re-baked every frame below)
+            baked.frustumCulled = false;
+            baked.userData.__baked = true;
+            baked.name = (o.name || 'mesh') + '_statue';
+            vrm.scene.add(baked);
+            o.visible = false;
+            frozen++;
+          }
+    renderer.render(scene, camera);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    frac2 = countOpaque(px) / (w * h);
+    window.__vlog('heal tier 2: bake skinned meshes', `frozen=${frozen} ${(frac2 * 100).toFixed(2)}% pixels`);
+    if (frac2 > 0.005) {   // statue renders while live GPU skinning does not — KEEP + CPU-animate it
+      window.__vlog('tier 2 statue kept', `baked=${frozen} meshes render ${(frac2 * 100).toFixed(2)}% — enabling per-frame CPU re-bake`);
+      buildStatueRigs(skinned);
+      window.__vesperStatue = true;
+      visCheckDone = true;
+      return;
+    }
+    const bakedList = [];
+    vrm.scene.traverse((o) => { if (o.userData && o.userData.__baked) bakedList.push(o); });
+    for (const b of bakedList) vrm.scene.remove(b);
+  } catch (e) { window.__vlog('heal tier 2 failed', e && e.message); }
+
+  // tier 3 would swap flat colors over the baked statue's face — ugly and
+  // pointless; in statue mode a dead canvas means reboot instead
+  if (window.__vesperStatue) {
+    rebootAvatar('heal cascade exhausted in statue mode');
+    visCheckDone = true;
+    return;
+  }
+
+  // tier 3: texture-independent — unlit flat colors sampled from each texture (zero shader deps)
+  let swapped = 0;
+  vrm.scene.traverse((o) => {
+    if ((o.isMesh || o.isSkinnedMesh) && o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      const nm = mats.map((m) => {
+        const col = averageTextureColor(m.map)
+          || (m.color && m.color.isColor ? m.color.clone() : new THREE.Color(0xcfc3e8));
+        window.__vlog('heal: mesh color', `${o.name || 'mesh'} → #${col.getHexString()}${m.map ? ' (from texture)' : ' (material color)'}`);
+        return new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide });
+      });
+      o.material = Array.isArray(o.material) ? nm : nm[0];
+      o.frustumCulled = false;
+      swapped++;
+    }
+  });
+  renderer.render(scene, camera);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  frac2 = countOpaque(px) / (w * h);
+  window.__vlog('fallback result', `swapped=${swapped} ${(frac2 * 100).toFixed(2)}% pixels rendered`);
+
+  // last resort: even flat colors fail → skinning must be broken too; freeze statues with the new materials
+  if (frac2 <= 0.005) {
+    try {
+      let frozen = 0;
+      const skinned = [];
+      vrm.scene.traverse((o) => { if (o.isSkinnedMesh) skinned.push(o); });
+      for (const o of skinned) {
+        o.updateMatrixWorld(true);
+        const baked = new THREE.Mesh(o.geometry.clone(), o.material);
+        baked.applyMatrix4(o.matrixWorld);
+        baked.frustumCulled = false;
+        vrm.scene.add(baked);
+        o.visible = false;
+        frozen++;
+      }
+      renderer.render(scene, camera);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      frac2 = countOpaque(px) / (w * h);
+      window.__vlog('fallback: baked statues', `frozen=${frozen} ${(frac2 * 100).toFixed(2)}% pixels`);
+    } catch (e) { window.__vlog('bake fallback failed', e && e.message); }
+  }
+  visCheckDone = true;
+}
+
+// morph targets on this model (VRoid / VRM 1.0 names). Optional ones are probed
+// at load — unavailable channels are skipped automatically (and logged).
+const MORPH = {
+  blink:   'Fcl_EYE_Close',
+  half:    'Fcl_EYE_Half',
+  winkL:   'Fcl_EYE_Close_L',
+  winkR:   'Fcl_EYE_Close_R',
+  smile:   'Fcl_MTH_Fun',
+  joy:     'Fcl_ALL_Joy',
+  surprised: 'Fcl_ALL_Surprised',
+  angry:   'Fcl_ALL_Angry',
+  sorrow:  'Fcl_ALL_Sorrow',
+  spread:  'Fcl_EYE_Spread',
+  browJoy: 'Fcl_BRW_Joy',
+  browSorrow: 'Fcl_BRW_Sorrow',
+  browAngry: 'Fcl_BRW_Angry',
+  browSurprised: 'Fcl_BRW_Surprised',
+  mouthUp: 'Fcl_MTH_Up',
+  mouthDown: 'Fcl_MTH_Down',
+  mouthSmall: 'Fcl_MTH_Small',
+  visemes: ['Fcl_MTH_A', 'Fcl_MTH_I', 'Fcl_MTH_U', 'Fcl_MTH_E', 'Fcl_MTH_O'],
+};
+
+// morph availability probe — filled in after the model loads
+const morphAvail = new Set();
+let morphProbeDone = false;
+const MORPH_ALIASES = [
+  ['half',    ['Fcl_EYE_Half']],
+  ['winkL',   ['Fcl_EYE_Close_L', 'blinkLeft']],
+  ['winkR',   ['Fcl_EYE_Close_R', 'blinkRight']],
+];
+function probeMorphs() {
+  try {
+    if (expressionManager && expressionManager.expressionMap) {
+      for (const k of Object.keys(expressionManager.expressionMap)) morphAvail.add(k);
+    }
+    for (const mesh of faceMeshes) {
+      for (const k of Object.keys(mesh.morphTargetDictionary || {})) morphAvail.add(k);
+    }
+    // resolve aliases: point MORPH entries at whichever name this model actually has
+    for (const [slot, candidates] of MORPH_ALIASES) {
+      const found = candidates.find((n) => morphAvail.has(n));
+      MORPH[slot] = found || candidates[0];
+      if (!found) window.__vlog('morph missing', slot + ' (tried ' + candidates.join(', ') + ')');
+    }
+    morphProbeDone = morphAvail.size > 0;
+    const names = [...morphAvail];
+    window.__vlog('morph probe', `${names.length} morphs available`);
+    for (let i = 0; i < names.length; i += 40) window.__vlog('morph list', names.slice(i, i + 40).join(','));
+  } catch (e) { window.__vlog('morph probe failed', e && e.message); }
+}
+function morphOK(name) { return !morphProbeDone || morphAvail.has(name); }
+function applyMorph(name, weight) { if (name && morphOK(name)) setFaceMorphImmediate(name, weight); }
+
+// animation helpers
+let nextBlinkAt = performance.now() + 1500 + Math.random() * 2500;
+let blinkPhase = -1;               // -1 = not blinking, else 0..1 progress
+let nextVisemeAt = 0;
+let visemeIndex = 0;
+let visemeWeight = 0;
+let mouthGateAt = 0;               // lips only move between word boundaries — no constant chewing
+let nextSaccadeAt = 0;             // little eye darts
+let saccade = { yaw: 0, pitch: 0 };
+let gazeTarget = null;
+
+// ── EMOTION ENGINE — she feels what she says ──────────
+// each emotion: face channels + body language + voice delivery
+// face: joy smile spread browJ browS browSur browAngry mouthU mouthD mouthS mouthO sorrow angry squint half winkR
+// body: energy bounce slouch pout lean chinUp headYaw headTilt headRoll gazeAway
+const EMOTIONS = {
+  calm:        { joy: 0.30, browJ: 0.12, voice: { pitch: 0.0, rate: 0.0 }, energy: 0.30 },
+  happy:       { joy: 0.55, browJ: 0.30, mouthU: 0.35, voice: { pitch: 0.15, rate: 0.03 }, energy: 0.55 },
+  excited:     { joy: 0.75, browJ: 0.45, spread: 0.35, mouthU: 0.5, voice: { pitch: 0.3, rate: 0.14 }, energy: 0.95, bounce: 0.045 },   // feisty enthusiasm — punches through
+  playful:     { joy: 0.45, browJ: 0.3, smile: 0.45, squint: 0.3, voice: { pitch: 0.05, rate: 0.08 }, energy: 0.65, bounce: 0.02 },      // dry sarcasm — cool, not giddy
+  laughing:    { joy: 1.0, squint: 0.85, mouthU: 0.5, browJ: 0.4, voice: { pitch: 0.25, rate: 0.15 }, energy: 1.0, bounce: 0.04 },       // full laughing fit (gesture layer adds pulses)
+  surprised:   { spread: 0.75, browSur: 0.75, mouthO: 0.55, voice: { pitch: 0.4, rate: 0.05 }, energy: 0.85 },
+  sad:         { sorrow: 0.55, browS: 0.5, mouthD: 0.45, squint: 0.2, voice: { pitch: -0.15, rate: -0.15 }, energy: 0.18, slouch: 0.5 },
+  crying:      { sorrow: 0.9, browS: 0.85, mouthD: 0.7, squint: 0.6, voice: { pitch: -0.22, rate: -0.2 }, energy: 0.12, slouch: 0.85 },  // real tears-in-voice sadness
+  angry:       { angry: 0.85, browAngry: 0.9, squint: 0.45, mouthS: 0.3, mouthD: 0.35, voice: { pitch: -0.1, rate: 0.12 }, energy: 0.9, lean: 0.6 },  // genuine fury — leans in
+  annoyed:     { angry: 0.5, browAngry: 0.55, squint: 0.3, mouthS: 0.35, voice: { pitch: -0.05, rate: 0.07 }, energy: 0.55, pout: 1 },   // the classic tsundere "hmph!"
+  jealous:     { browAngry: 0.35, browS: 0.4, sorrow: 0.3, joy: 0.12, mouthS: 0.4, squint: 0.3, voice: { pitch: -0.05, rate: 0.05 }, energy: 0.6, pout: 1, headYaw: -0.22, gazeAway: 0.65 },  // hmph — looks away, won't admit it
+  embarrassed: { sorrow: 0.35, joy: 0.3, squint: 0.4, mouthS: 0.5, browS: 0.3, voice: { pitch: 0.1, rate: -0.05 }, energy: 0.5, headYaw: 0.35, headTilt: 0.12, gazeAway: 0.5 },  // caught off guard — turns away, fidgets
+  smug:        { smile: 0.65, mouthU: 0.5, squint: 0.5, browJ: 0.2, voice: { pitch: -0.02, rate: -0.03 }, energy: 0.45, chinUp: 0.12 },  // won the argument, savoring it
+  confused:    { browSur: 0.6, browS: 0.25, mouthS: 0.45, spread: 0.2, voice: { pitch: 0.05, rate: -0.08 }, energy: 0.45, headTilt: 0.2 },  // head tilt — genuinely puzzled
+  disgusted:   { browS: 0.4, squint: 0.5, mouthD: 0.6, sorrow: 0.35, angry: 0.2, voice: { pitch: -0.05, rate: 0.05 }, energy: 0.5, lean: -0.4, headYaw: -0.2, gazeAway: 0.4 },  // leans AWAY
+  proud:       { smile: 0.7, browJ: 0.3, squint: 0.25, mouthU: 0.4, voice: { pitch: 0.05, rate: 0.02 }, energy: 0.7, chinUp: 0.15 },
+  wink:        { winkR: 0.9, smile: 0.6, joy: 0.4, browJ: 0.3, mouthU: 0.35, voice: { pitch: 0.12, rate: 0.06 }, energy: 0.7 },
+  love:        { joy: 0.6, browJ: 0.3, squint: 0.3, smile: 0.5, mouthU: 0.4, voice: { pitch: 0.18, rate: -0.05 }, energy: 0.5 },
+  worried:     { browS: 0.45, spread: 0.3, mouthD: 0.3, voice: { pitch: 0.1, rate: 0.15 }, energy: 0.45 },
+  sleepy:      { half: 0.6, sorrow: 0.25, browS: 0.3, mouthS: 0.2, voice: { pitch: -0.2, rate: -0.25 }, energy: 0.1, slouch: 0.35 },
+};
+let currentEmotion = 'calm';
+let emotionUntil = 0;              // timestamp; when past it the emotion fades back to calm over 2.5s
+let emo = EMOTIONS.calm;           // current emotion definition (updated each frame)
+let emotionBlend = 0;              // 1 while fresh → 0 after fading
+const emoCur = { joy:0, smile:0, spread:0, browJ:0, browS:0, browAngry:0, browSur:0, mouthU:0, mouthD:0, mouthS:0, mouthO:0, sorrow:0, angry:0, squint:0, half:0, winkL:0, winkR:0, mouthA:0 };
+
+function setEmotion(name, holdSec = 0) {
+  if (!EMOTIONS[name]) name = 'calm';
+  currentEmotion = name;
+  emotionUntil = holdSec ? performance.now() + holdSec * 1000 : Infinity;
+}
+
+// cursor tracking (she turns her head toward your pointer)
+let cursorNX = 0, cursorNY = 0;    // normalized -1..1
+let cursorInfluence = 0;           // smoothed 0..1
+let lastMouseMoveAt = -1e9;
+const headAim = { yaw: 0, pitch: 0, roll: 0 };  // smoothed head angles (rad)
+
+// idle weight shifting & micro-expressions
+const weightShift = { x: 0, target: 0, nextAt: 4000 };
+
+// stance variety & fidgeting — real people don't hold one pose or stand perfectly still
+const pose = { cur: 'neutral', next: 'neutral', blend: 1, nextAt: 0 };
+const fidget = { value: 0, nextAt: 9000 + Math.random() * 8000 };
+let lastGazeYaw = 0;               // for blink-after-big-gaze-shift
+let speakGlanceUntil = 0;          // mid-sentence glance aside while talking
+let speakGlanceDir = 1;            // which side she glances toward
+const micro = { value: 0, target: 0 };
+let microNextAt = 3000;
+let emotionFlash = null;           // { name, until }
+
+// scratch vectors for gaze math
+const _dir = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _up = new THREE.Vector3();
+const _awayPoint = new THREE.Vector3();
+
+// brief full-face emotion, e.g. flashEmotion('surprised')
+function flashEmotion(name, seconds = 1.4) {
+  emotionFlash = { name, until: performance.now() + seconds * 1000 };
+}
+
+window.addEventListener('mousemove', (e) => {
+  cursorNX = (e.clientX / window.innerWidth) * 2 - 1;
+  cursorNY = (e.clientY / window.innerHeight) * 2 - 1;
+  lastMouseMoveAt = performance.now();
+  markActivity();
+});
+
+// layered-sine noise ≈ smooth random drift in [-1, 1]
+function noise1(t, seed = 0) {
+  return Math.sin(t * 0.63 + seed * 12.9) * 0.5
+       + Math.sin(t * 1.37 + seed * 7.1) * 0.3
+       + Math.sin(t * 2.71 + seed * 3.7) * 0.2;
+}
+
+// legacy shim: apply morph weights directly (emotion engine smooths its own channels)
+function setMorph(name, weight) {
+  setFaceMorphImmediate(name, weight);
+}
+
+// ── GESTURE LAYER — short, precise, timeline-driven actions ──────────
+// laugh bursts, wave, yawn, wake-startle, nod, head-shake, sleep twitches.
+// Each gesture writes overrides into a scratch object G; animateAvatar merges
+// them over the eased emotion channels with max(), so nothing fights.
+const gestures = [];               // active: { name, t0, dur, data }
+let gazeAwayUntil = 0;             // eyes deliberately off-camera (sad / embarrassed moods)
+
+// ── SPEECH BEAT GESTURES — punctuate talking like a real person ──
+// speak() schedules these on word boundaries; a fallback rhythm lives in the render loop.
+function scheduleBeat(count = 1) {
+  for (let i = 0; i < count; i++) {
+    setTimeout(() => {
+      if (avatarState === 'speaking') fireGesture('beat', { energy: 0.45 + Math.random() * 0.5 });
+    }, i * (450 + Math.random() * 350));
+  }
+}
+
+// ── EMOTION → BODY LANGUAGE — the AI's [EMO:...] tag plays as a full-body performance ──
+// The face comes free via setEmotion(); this adds the matching body gesture and eye behavior.
+const EMOTION_BODY = {
+  happy:       { gesture: 'wave' },
+  excited:     { gesture: 'fistpump' },
+  playful:     { gesture: 'beat', data: { energy: 0.55 } },
+  laughing:    { gesture: 'laugh' },
+  smug:        { gesture: 'beat', data: { energy: 0.35 } },
+  proud:       { gesture: 'beat', data: { energy: 0.55 } },
+  wink:        { gesture: 'beat', data: { energy: 0.45 } },
+  love:        { gesture: 'heart' },
+  sad:         { gazeAway: 1 },                                  // won't meet your eyes
+  crying:      { gesture: 'facepalm' },
+  annoyed:     { gesture: 'hmph' },
+  angry:       { gesture: 'beat', data: { energy: 0.9 } },
+  jealous:     { gesture: 'hmph' },
+  embarrassed: { gazeAway: 1 },
+  disgusted:   { gesture: 'recoil' },
+  surprised:   { gesture: 'recoil' },
+  confused:    { gesture: 'shrug' },
+  worried:     { gesture: 'thinkpose' },
+  sleepy:      { gesture: 'yawn' },
+  calm:        {},
+};
+const emoBodyCooldown = {};
+function performEmotion(name) {
+  const spec = EMOTION_BODY[name];
+  if (!spec) return;
+  const now = performance.now();
+  if (now - (emoBodyCooldown[name] || 0) < (name === 'happy' ? 25000 : 14000)) return;   // waves get old fast
+  emoBodyCooldown[name] = now;
+  if (spec.gesture) fireGesture(spec.gesture, spec.data || {});
+  if (spec.gazeAway) gazeAwayUntil = Math.max(gazeAwayUntil, now + spec.gazeAway * 4000);
+  if (name === 'excited') scheduleBeat(2);
+}
+const GESTURES = {
+  laugh: {
+    baseDur: 2400,
+    apply(g, p, now, G) {
+      // "ha-ha-HA" — 3 pulses, each a smooth attack/decay bump
+      let env = 0;
+      for (let i = 0; i < 3; i++) {
+        const c = 0.16 + 0.32 * i;
+        const w = Math.max(0, 1 - Math.abs((p - c) / 0.15));
+        env = Math.max(env, w * w * (3 - 2 * w));
+      }
+      const amp = 0.6 + 0.4 * (g.data.energy || 0.7);
+      const s = now * 0.001;
+      G.joy = Math.max(G.joy, 0.95 * env * amp);
+      G.squint = Math.max(G.squint, 0.95 * env);
+      G.mouthA = Math.max(G.mouthA, 0.85 * env * amp);
+      G.browJ = Math.max(G.browJ, 0.4 * env);
+      G.headP += (-0.13 * env + Math.sin(s * 2.6) * 0.03 * env) * amp;   // head thrown back, rocking
+      G.headR += Math.sin(s * 5.3) * 0.045 * env;
+      G.bounce += Math.abs(Math.sin(s * 6.4)) * 0.026 * env * amp;       // torso shake
+      G.armShake = Math.max(G.armShake, 0.05 * env);                     // shoulders trembling
+    },
+  },
+  yawn: {
+    baseDur: 2600,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.35) * Math.min(1, (1 - p) / 0.35);
+      G.mouthO = Math.max(G.mouthO, 0.9 * e);
+      G.squint = Math.max(G.squint, 0.5 * e);
+      G.half = Math.max(G.half, 0.4 * e);
+      G.browS = Math.max(G.browS, 0.3 * e);
+      G.headP += -0.12 * e;   // head tips back mid-yawn
+      G.headR += 0.03 * Math.sin(p * Math.PI * 4) * e;
+    },
+  },
+  wave: {
+    baseDur: 2100,
+    apply(g, p, now, G) {
+      G.waveR = Math.max(G.waveR, Math.min(1, p / 0.22) * Math.min(1, (1 - p) / 0.2));
+    },
+  },
+  shrug: {
+    baseDur: 2200,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.3) * Math.min(1, (1 - p) / 0.4);   // rise, hold, settle
+      G.splayL = Math.max(G.splayL, e); G.splayR = Math.max(G.splayR, e);
+      G.headR += 0.07 * e;
+    },
+  },
+  facepalm: {
+    baseDur: 2600,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.22) * Math.min(1, (1 - p) / 0.45);
+      G.palmR = Math.max(G.palmR, e);
+      G.headP += 0.16 * e;                                          // head drops into the hand
+      G.browS = Math.max(G.browS, 0.35 * e);
+    },
+  },
+  hmph: {
+    baseDur: 1100,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.3) * Math.min(1, (1 - p) / 0.4);
+      G.headY += -0.3 * e;                                          // sharp look-away
+      G.headR += -0.05 * e;
+    },
+  },
+  recoil: {
+    baseDur: 800,
+    apply(g, p, now, G) {
+      const e = Math.sin(Math.min(1, p) * Math.PI);
+      G.bodyZ -= 0.11 * e;                                          // whole torso leans back
+      G.palmL = Math.max(G.palmL, 0.85 * e); G.palmR = Math.max(G.palmR, 0.85 * e);
+    },
+  },
+  clap: {
+    baseDur: 1400,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.25) * Math.min(1, (1 - p) / 0.35);
+      G.clap = Math.max(G.clap, e * (0.65 + 0.35 * (g.data.energy || 1)));
+      G.joy = Math.max(G.joy, 0.45 * e);
+      G.browJ = Math.max(G.browJ, 0.3 * e);
+    },
+  },
+  fistpump: {
+    baseDur: 1400,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.3) * Math.min(1, (1 - p) / 0.4);
+      G.pumpR = Math.max(G.pumpR, e * (0.7 + 0.3 * (g.data.energy || 1)));
+      G.joy = Math.max(G.joy, 0.6 * e);
+    },
+  },
+  heart: {
+    baseDur: 2400,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.3) * Math.min(1, (1 - p) / 0.4);
+      G.chestR = Math.max(G.chestR, e);                             // both hands to the chest
+      G.joy = Math.max(G.joy, 0.45 * e);
+      G.browJ = Math.max(G.browJ, 0.25 * e);
+      G.headR += 0.06 * e;
+    },
+  },
+  stretch: {
+    baseDur: 3400,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.3) * Math.min(1, (1 - p) / 0.35);
+      G.splayL = Math.max(G.splayL, e); G.splayR = Math.max(G.splayR, e);
+      G.bodyZ -= 0.05 * e;
+      G.headR += 0.08 * e;
+    },
+  },
+  thinkpose: {
+    baseDur: 2000,
+    apply(g, p, now, G) {
+      const e = Math.min(1, p / 0.25) * Math.min(1, (1 - p) / 0.5);
+      G.pinchR = Math.max(G.pinchR, e);                             // fingers to the nose bridge
+      G.headP += 0.08 * e;
+    },
+  },
+  beat: {
+    baseDur: 900,
+    apply(g, p, now, G) {
+      const e = Math.sin(Math.min(1, p) * Math.PI);
+      G.beatR = Math.max(G.beatR, e * (0.5 + 0.5 * (g.data.energy || 0.5)));
+    },
+  },
+  fidget: {
+    baseDur: 3800,
+    apply(g, p, now, G) {
+      if (p > 0.12 && p < 0.8) {                 // ramp in/out — never a visible on/off snap
+        fidget.value = Math.min(1, fidget.value + 0.08);
+      } else {
+        fidget.value = Math.max(0, fidget.value - 0.06);
+      }
+    },
+  },
+  wake: {
+    baseDur: 900,
+    apply(g, p, now, G) {
+      const e = p < 0.45 ? 1 - p / 0.45 : 0;
+      G.spread = Math.max(G.spread, 0.6 * e);
+      G.browSur = Math.max(G.browSur, 0.75 * e);
+      G.mouthO = Math.max(G.mouthO, 0.45 * e);
+      G.squint = Math.max(G.squint, 0.4 * e);
+      G.headP += -0.3 * e;   // snaps upright out of the droop
+    },
+  },
+  nod: {
+    baseDur: 750,
+    apply(g, p, now, G) { G.headP += Math.sin(p * Math.PI * 2) * 0.12 * (1 - p * 0.3); },
+  },
+  shake: {
+    baseDur: 950,
+    apply(g, p, now, G) { G.headY += Math.sin(p * Math.PI * 3) * 0.16 * (1 - p * 0.3); },
+  },
+  twitch: {
+    baseDur: 650,
+    apply(g, p, now, G) {
+      const e = Math.sin(p * Math.PI);
+      G.armShake = Math.max(G.armShake, 0.02 * e);
+      G.headR += 0.02 * e;
+    },
+  },
+};
+
+function fireGesture(name, data = {}) {
+  const spec = GESTURES[name];
+  if (!spec || gestures.some((g) => g.name === name)) return;
+  gestures.push({ name, t0: performance.now(), dur: spec.baseDur, data });
+}
+
+function updateGestures(now, delta, G) {
+  for (let i = gestures.length - 1; i >= 0; i--) {
+    const g = gestures[i];
+    const p = (now - g.t0) / g.dur;
+    if (p >= 1) { gestures.splice(i, 1); continue; }
+    try { GESTURES[g.name].apply(g, p, now, G); } catch (e) { gestures.splice(i, 1); }
+  }
+}
+
+// ── IDLE LIFECYCLE — engaged → staring into the void → drowsy → asleep ──
+let lastActivityAt = performance.now();
+let nextYawnAt = 0, nextTwitchAt = 0;
+let stareAmt = 0, drowsyAmt = 0, sleepAmt = 0;
+let breathT = 0;
+const headVel = { yaw: 0, pitch: 0, roll: 0 };   // spring velocity for the head
+
+function idlePhaseNow() {
+  if (avatarState !== 'idle') return 0;
+  const dt = performance.now() - lastActivityAt;
+  return dt > 95000 ? 3 : dt > 55000 ? 2 : dt > 20000 ? 1 : 0;
+}
+
+function markActivity() {
+  const wasDeep = (performance.now() - lastActivityAt) > 55000 && avatarState === 'idle';
+  lastActivityAt = performance.now();
+  if (wasDeep) {   // jolted awake — she startles, then pretends she wasn't asleep
+    fireGesture('wake');
+    flashEmotion('surprised', 1.3);
+    sleepAmt = 0.15; drowsyAmt = 0.35;   // eyes snap open in sync with the head, not seconds later
+  }
+}
+window.addEventListener('keydown', markActivity);
+
+// ── TYPING REACTIONS — she reads what you type before the AI even replies ──
+const REACT_RULES = [
+  { re: /(lol|lmao|rofl|haha|hehe|😂|🤣)/i, emo: 'laughing', gesture: 'laugh', cd: 6000 },
+  { re: /\b(hi|hello|hey|yo|good (morning|evening|afternoon))\b/i, emo: 'happy', gesture: 'wave', cd: 20000 },
+  { re: /(love you|❤|😍|🥰|marry)/i, emo: 'love', cd: 8000 },
+  { re: /\b(hate|stupid|idiot|ugly|dumb|shut up|loser)\b/i, emo: 'angry', cd: 9000 },
+  { re: /\b(jealous|envious|your ex)\b/i, emo: 'jealous', cd: 9000 },
+  { re: /\b(sorry|my bad|oops)\b/i, emo: 'smug', cd: 9000 },
+  { re: /\b(no way|omg|whoa|wow)\b/i, emo: 'surprised', cd: 7000 },
+  { re: /\b(sad|crying|depressed|heartbroken)\b/i, emo: 'crying', cd: 10000 },
+  { re: /\b(ew|gross|disgusting|nasty)\b/i, emo: 'disgusted', cd: 9000 },
+  { re: /\b(yes|yeah|ok|okay|sure|exactly|correct|nice)\b/i, gesture: 'nod', cd: 7000 },
+  { re: /\b(no|nope|never|nah|wrong|lies?)\b/i, gesture: 'shake', cd: 7000 },
+];
+const reactCooldown = {};
+function reactToText(text) {
+  markActivity();
+  const now = performance.now();
+  for (const rule of REACT_RULES) {
+    if (!rule.re.test(text)) continue;
+    if (rule.cd && now - (reactCooldown[rule.re.source] || 0) < rule.cd) break;
+    reactCooldown[rule.re.source] = now;
+    if (rule.emo) setEmotion(rule.emo, 4);
+    if (rule.gesture) fireGesture(rule.gesture, { energy: 0.8 });
+    break;   // first matching rule wins
+  }
+}
+
+function setFaceMorphImmediate(name, weight) {
+  // Prefer the VRM expression system when the model declares expressions,
+  // otherwise drive raw morphTargetInfluences on every face mesh primitive.
+  if (expressionManager && expressionManager.getExpression(name)) {
+    expressionManager.setValue(name, weight);
+    return;
+  }
+  for (const mesh of faceMeshes) {
+    const idx = mesh.morphTargetDictionary ? mesh.morphTargetDictionary[name] : undefined;
+    if (idx !== undefined && mesh.morphTargetInfluences) {
+      mesh.morphTargetInfluences[idx] = weight;
+    }
+  }
+}
+
+function initAvatar() {
+  window.__vlog('initAvatar: creating renderer', `context #${++contextCount}`);
+  try {
+    // no powerPreference: 'high-performance' forces the discrete GPU on hybrid
+    // (Optimus) machines — it died repeatedly in watchdog logs; leave it default
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    canvas.addEventListener('webglcontextlost', (ev) => {
+      ev.preventDefault();   // allow the browser to restore the context
+      window.__vlog('WEBGL CONTEXT LOST', 'restore pending');
+    }, false);
+    canvas.addEventListener('webglcontextrestored', () => {
+      window.__vlog('WEBGL CONTEXT RESTORED', 're-verifying avatar visibility');
+      visCheckDone = false;
+      visCheckAt = performance.now() + 1200;
+    }, false);
+  } catch (err) {
+    window.__vlog('WEBGL FAILED', err && err.message);
+    statusLabel.textContent = '3d unavailable';
+    return;
+  }
+  window.__vlog('webgl ok', 'powerPreference=default');
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  scene = new THREE.Scene();
+
+  camera = new THREE.PerspectiveCamera(22, 1, 0.1, 20);
+  camera.position.set(0, 1.28, 0.95);
+  camera.lookAt(0, 1.12, 0);
+
+  // soft studio lighting, warm tones to match her (brown hair, cream & navy outfit)
+  const hemi = new THREE.HemisphereLight(0xfff4e6, 0x4a3828, 1.15);
+  scene.add(hemi);
+  const key = new THREE.DirectionalLight(0xffffff, 1.1);
+  key.position.set(0.6, 1.6, 1.4);
+  scene.add(key);
+  const rim = new THREE.PointLight(0xffc890, 1.8, 6);
+  rim.position.set(-0.8, 1.5, -1.2);
+  scene.add(rim);
+
+  // soft glow disc under her — pure fragment-shader math (no texture, immune to texture pipeline bugs)
+  const disc = new THREE.Mesh(
+    new THREE.CircleGeometry(0.55, 48),
+    new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: 'varying vec2 vUv; void main(){ float d = length(vUv - 0.5) * 2.0; float a = smoothstep(1.0, 0.0, d) * 0.5; gl_FragColor = vec4(1.0, 0.85, 0.66, a); }',
+    })
+  );
+  disc.rotation.x = -Math.PI / 2;
+  disc.position.y = 0.012;
+  scene.add(disc);
+
+  // gaze target (she keeps eye contact with the viewer)
+  gazeTarget = new THREE.Object3D();
+  gazeTarget.position.copy(camera.position);
+  scene.add(gazeTarget);
+
+  const loader = new GLTFLoader();
+  loader.register((parser) => new VRMLoaderPlugin(parser));
+
+  statusLabel.textContent = 'summoning vesper…';
+  window.__vlog('loading vrm…', '/model/ella.vrm?v=3');
+
+  const loadModel = (attempt = 0) => {
+    loader.load(
+      '/model/ella.vrm?v=3',
+      (gltf) => {
+        vrm = gltf.userData.vrm;
+        if (!vrm) { window.__vlog('VRM PLUGIN MISSING', 'gltf.userData.vrm undefined'); statusLabel.textContent = 'avatar failed to load'; return; }
+        scene.add(vrm.scene);
+        window.__vlog('vrm added to scene', 'expressionManager=' + !!(vrm.expressionManager));
+
+        // ── SKINNED-MESH REPAIR (full rebuild) ──
+        // Evidence chain: GPU draws calls=23 tris=57123 yet opaque=0.00%, while the
+        // statue (same geometry, skinning skipped) renders 30% of the screen. So the
+        // skinning matrices are wrong, not the geometry or materials. The model is at
+        // bind pose right now — rebuilding every inverse-bind as matrixWorld⁻¹ makes
+        // skinning collapse to identity at rest, so the rest pose MUST render.
+        try { VRMUtils.removeUnnecessaryVertices(vrm.scene); } catch (e) { window.__vlog('rmv-vertices failed', e && e.message); }
+        try { VRMUtils.combineSkeletons(vrm.scene); } catch (e) { window.__vlog('combineSkeletons failed', e && e.message); }
+        let repaired = 0; const issues = [];
+        vrm.scene.updateMatrixWorld(true);
+        vrm.scene.traverse((obj) => {
+          if (!obj.isSkinnedMesh || !obj.skeleton) return;
+          const sk = obj.skeleton;
+          const bones = sk.bones;
+          if (!sk.boneInverses || sk.boneInverses.length !== bones.length) {
+            sk.boneInverses = bones.map(() => new THREE.Matrix4());
+            issues.push('inverses-count-fixed');
+          }
+          // full rebuild: file-supplied bind data is evidently wrong — trust the scene graph instead
+          for (let i = 0; i < bones.length; i++) {
+            if (bones[i]) sk.boneInverses[i].copy(bones[i].matrixWorld).invert();
+          }
+          issues.push('binds-rebuilt');
+          if (obj.geometry && obj.geometry.attributes.skinWeight) obj.normalizeSkinWeights();
+          obj.bindMode = 'attached';
+          obj.frustumCulled = false;
+          repaired++;
+        });
+        window.__vlog('skinning repair', `meshes=${repaired} ${issues.join('+') || 'counts-ok'}`);
+
+        // ── CPU GROUND-TRUTH PROBE ──
+        // Skin one vertex on the CPU with the SAME math the GPU would use. If the
+        // result lands inside the head/face volume, skinning is provably sane.
+        try {
+          let probeMesh = null, probeName = '';
+          vrm.scene.traverse((o) => {
+            if (!probeMesh && o.isSkinnedMesh && o.geometry && o.geometry.attributes.skinIndex && o.geometry.attributes.skinWeight) {
+              probeMesh = o; probeName = o.name || 'mesh';
+            }
+          });
+          if (probeMesh) {
+            const g = probeMesh.geometry;
+            const pos = g.attributes.position, si = g.attributes.skinIndex, sw = g.attributes.skinWeight;
+            const i0 = Math.floor(pos.count / 2);
+            const v0 = new THREE.Vector3().fromBufferAttribute(pos, i0);
+            const skin = new THREE.Vector3(0, 0, 0);
+            let wSum = 0;
+            for (let k = 0; k < 4; k++) {
+              const bIdx = si.getComponent ? si.getComponent(i0, k) : si.array[i0 * 4 + k];
+              const w = sw.getComponent ? sw.getComponent(i0, k) : sw.array[i0 * 4 + k];
+              wSum += w;
+              if (!w) continue;
+              const boneM = probeMesh.skeleton.bones[bIdx].matrixWorld;
+              const bm = probeMesh.skeleton.boneInverses[bIdx];
+              const m = new THREE.Matrix4().multiplyMatrices(boneM, bm);
+              skin.addScaledVector(v0.clone().applyMatrix4(m), w);
+            }
+            const finalV = skin.clone().applyMatrix4(probeMesh.matrixWorld);
+            window.__vlog('cpu skin probe', `${probeName} v${i0} → (${finalV.x.toFixed(2)},${finalV.y.toFixed(2)},${finalV.z.toFixed(2)}) wSum=${wSum.toFixed(3)}`);
+          } else {
+            window.__vlog('cpu skin probe', 'no skinned mesh with skin attributes found');
+          }
+        } catch (e) { window.__vlog('cpu skin probe failed', e && e.message); }
+
+        // collect every mesh with morph targets (the face is split across primitives)
+        vrm.scene.traverse((obj) => {
+          if (obj.isMesh && obj.morphTargetDictionary && Object.keys(obj.morphTargetDictionary).length) {
+            faceMeshes.push(obj);
+          }
+        });
+        expressionManager = vrm.expressionManager || null;
+        probeMorphs();
+
+        if (vrm.lookAt) {
+          vrm.lookAt.target = gazeTarget;
+        }
+
+        frameAvatar();
+        // geometry sanity check: if the box is tiny/huge or empty, framing is the bug
+        try {
+          const box = new THREE.Box3().setFromObject(vrm.scene);
+          const size = box.getSize(new THREE.Vector3());
+          const center = box.getCenter(new THREE.Vector3());
+          const headNode = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('head');
+          const headPos = headNode ? (headNode.getWorldPosition(new THREE.Vector3()).toArray().map(v => v.toFixed(2)).join(',')) : 'n/a';
+          window.__vlog('vrm ready', `bbox size=${size.toArray().map(v => v.toFixed(2)).join(',')} center=${center.toArray().map(v => v.toFixed(2)).join(',')} head=${headPos} faceMeshes=${faceMeshes.length} cam=${camera.position.toArray().map(v => v.toFixed(2)).join(',')}`);
+        } catch (e) { window.__vlog('bbox check failed', e && e.message); }
+        // schedule the pixel visibility check ~1.2s after load (let textures land)
+        visCheckAt = performance.now() + 1200;
+        statusLabel.textContent = 'idle';
+      },
+      undefined,
+      (err) => {
+        console.error('VRM load failed:', err);
+        window.__vlog('VRM LOAD ERROR', (err && (err.message || err.error)) || String(err));
+        // one automatic retry — covers a hiccup on first fetch (e.g. server just restarting)
+        if (attempt < 1) {
+          statusLabel.textContent = 'retrying…';
+          setTimeout(() => loadModel(attempt + 1), 1200);
+          return;
+        }
+        statusLabel.textContent = 'avatar failed to load';
+        flashEmotion('sad', 3);
+        addMessage("I couldn't load my avatar (model/ella.vrm). Is the server running from the project folder? I'm still here though!", 'vesper');
+      }
+    );
+  };
+  loadModel();
+
+  window.addEventListener('resize', resizeAvatar);
+  resizeAvatar();
+  renderer.setAnimationLoop(tick);
+}
+
+function makeGlowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  grad.addColorStop(0, 'rgba(255,216,170,0.5)');
+  grad.addColorStop(0.5, 'rgba(255,216,170,0.18)');
+  grad.addColorStop(1, 'rgba(255,216,170,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 256, 256);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// ── texture-failure fallback: read average color out of a texture ──
+function averageTextureColor(tex) {
+  try {
+    if (!tex || !tex.image) return null;
+    const img = tex.image;
+    const c = document.createElement('canvas');
+    c.width = 16; c.height = 16;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(img, 0, 0, 16, 16);
+    const d = g.getImageData(0, 0, 16, 16).data;
+    let r = 0, gg = 0, b = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 16) continue;           // skip transparent pixels
+      r += d[i]; gg += d[i + 1]; b += d[i + 2]; n++;
+    }
+    if (!n) return null;
+    return new THREE.Color(r / n / 255, gg / n / 255, b / n / 255);
+  } catch (e) { return null; }
+}
+
+let avatarFocus = new THREE.Vector3(0, 1.12, 0);   // shared with resize reframing
+
+function positionCamera() {
+  // pull back on wide screens so she sits centered in the background, not filling it
+  const dist = Math.max(0.85, (camera.aspect || 1) * 0.9);   // no aspect multiplier collapse — she must stay out of clipping range
+  camera.position.set(avatarFocus.x, avatarFocus.y + 0.08, avatarFocus.z + dist);
+  camera.lookAt(avatarFocus);
+  if (gazeTarget) gazeTarget.position.copy(camera.position);
+}
+
+function frameAvatar() {
+  // center the shot on her head so the framing works for any model size
+  const headNode = vrm.humanoid ? vrm.humanoid.getNormalizedBoneNode('head') : null;
+  avatarFocus.set(0, 1.12, 0);   // fallback: typical VRM head height
+  if (headNode) {
+    vrm.scene.updateMatrixWorld(true);
+    headNode.getWorldPosition(avatarFocus);
+  } else {
+    const box = new THREE.Box3().setFromObject(vrm.scene);
+    avatarFocus.copy(box.getCenter(new THREE.Vector3()));
+  }
+  positionCamera();
+}
+
+function resizeAvatar() {
+  if (!renderer) return;
+  const wrap = document.getElementById('orb-wrap');
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  positionCamera();
+  camera.updateProjectionMatrix();
+}
+
+function tick() {
+  const delta = Math.min(clock.getDelta(), 0.05);
+  const t = clock.elapsedTime;
+
+  // ease energy: state sets the floor, emotion adds color
+  const stateEnergyTable = { idle: 0.3, listening: 0.6, thinking: 0.9, speaking: 1.0 };
+  emo = EMOTIONS[currentEmotion] || EMOTIONS.calm;
+  const isEmotionFresh = performance.now() < emotionUntil;
+  emotionBlend = isEmotionFresh ? 1 : Math.max(0, 1 - (performance.now() - emotionUntil) / 2500);  // fades out over 2.5s
+  const targetEnergy = Math.min(1, (stateEnergyTable[avatarState] || 0.3) * (0.6 + 0.4 * emotionBlend) + (isEmotionFresh ? (emo.energy || 0.3) * 0.25 : 0));
+  stateEnergy += (targetEnergy - stateEnergy) * (1 - Math.exp(-delta * 4));
+
+  if (vrm) {
+    try {
+      animateAvatar(delta, t);
+      vrm.update(delta);
+      if (window.__vesperStatue) rebakeStatues();   // pose the skeleton, then skin on CPU
+    } catch (err) {
+      // never let one bad frame kill the render loop permanently
+      if (!window.__vesperAnimWarned) {
+        window.__vesperAnimWarned = true;
+        console.error('avatar animation error:', err);
+      }
+    }
+  }
+
+  if (renderer && scene && camera) {
+    renderer.render(scene, camera);
+    if (!window.__vesperRendered) {
+      window.__vesperRendered = true;
+      window.__vlog('first frame rendered', 'scene children=' + scene.children.length);
+    }
+    checkVisibility(performance.now());
+    watchdogTick(performance.now());
+  }
+}
+
+function animateAvatar(delta, t) {
+  const now = performance.now();
+  const H = vrm.humanoid;
+  const node = (n) => (H ? H.getNormalizedBoneNode(n) : null);
+  const head = node('head');
+  const neck = node('neck');
+  const chest = node('chest');
+  const spine = node('spine');
+  const hips = node('hips');
+  const lUpper = node('leftUpperArm'), rUpper = node('rightUpperArm');
+  const lLower = node('leftLowerArm'), rLower = node('rightLowerArm');
+  const lHand = node('leftHand'), rHand = node('rightHand');
+  const E = THREE.MathUtils.degToRad;
+  const e = stateEnergy;
+
+  // ── idle lifecycle (engaged → staring → drowsy → asleep) & gesture layer ──
+  const ph = idlePhaseNow();
+  stareAmt += ((ph >= 1 ? 1 : 0) - stareAmt) * (1 - Math.exp(-delta * 0.8));
+  drowsyAmt += ((ph >= 2 ? 1 : 0) - drowsyAmt) * (1 - Math.exp(-delta * 0.5));
+  sleepAmt += ((ph >= 3 ? 1 : 0) - sleepAmt) * (1 - Math.exp(-delta * 0.4));
+  const G = { joy:0, smile:0, spread:0, browJ:0, browS:0, browAngry:0, browSur:0,
+              mouthU:0, mouthD:0, mouthS:0, mouthO:0, sorrow:0, angry:0, squint:0, half:0,
+              winkL:0, winkR:0, mouthA:0, headP:0, headY:0, headR:0,
+              bounce:0, armShake:0, waveR:0, gazeAway:0,
+              splayL:0, splayR:0, palmL:0, palmR:0, clap:0, pumpR:0, chestR:0, pinchR:0,
+              beatR:0, bodyZ:0 };
+  updateGestures(now, delta, G);
+  // drowsy yawns & sleep twitches on a clock
+  if (drowsyAmt > 0.5 && !gestures.some((g) => g.name === 'yawn') && now > nextYawnAt) {
+    nextYawnAt = now + 16000 + Math.random() * 12000;
+    fireGesture('yawn');
+  }
+  // fidget scheduler: occasional while engaged, almost never when winding down
+  if (now > fidget.nextAt && avatarState !== 'thinking') {
+    const engage = 1 - 0.75 * drowsyAmt - 0.95 * sleepAmt;
+    if (Math.random() < engage * 0.6) {
+      fireGesture('fidget', {});
+      fidget.value = 0;                          // ramp up inside the gesture
+    }
+    fidget.nextAt = now + 14000 + Math.random() * 18000;
+  }
+  if (sleepAmt > 0.7 && now > nextTwitchAt) {
+    nextTwitchAt = now + 7000 + Math.random() * 9000;
+    fireGesture('twitch');
+  }
+
+  // ── natural stance: blend between human poses ─────
+  // (normalized VRM bones: arms point ±X, so Z swings down, Y swings fwd/back)
+  // Pose drift: every 7–13s she settles into a different natural way to stand —
+  // nothing held forever, nothing snapped. Blend eased over ~1s via poseBlend.
+  const POSES = {
+    neutral: { uZ: 1.08, uY: 0.22, lZ: 0.12, lY: 0.30, hand: 0.08 },
+    clasped: { uZ: 0.78, uY: 0.55, lZ: 0.62, lY: 0.18, hand: 0.05 },   // hands loosely together in front
+    hiph:    { uZ: 1.02, uY: 0.10, lZ: 0.55, lY: 0.30, hand: 0.12 },   // one elbow bent, hand near hip
+    pocket:  { uZ: 1.12, uY: 0.04, lZ: 0.04, lY: 0.34, hand: 0.02 },   // hands drifting back
+  };
+  if (now > pose.nextAt) {
+    pose.nextAt = now + 7000 + Math.random() * 6000;
+    pose.cur = pose.next;                          // previous target becomes the base
+    const keys = Object.keys(POSES);
+    pose.next = keys[Math.floor(Math.random() * keys.length)];
+    if (avatarState === 'thinking') pose.next = 'clasped';
+  }
+  pose.blend = Math.min(1, pose.blend + delta * 0.9);
+  const A = POSES[pose.cur] || POSES.neutral, B = POSES[pose.next] || POSES.neutral;
+  const mix = (a, b) => a + (b - a) * pose.blend;
+  const uZ = mix(A.uZ, B.uZ), uY = mix(A.uY, B.uY), lZ = mix(A.lZ, B.lZ), lY = mix(A.lY, B.lY), handR = mix(A.hand, B.hand);
+  // fidget target: mid-change (0.15–0.85) — if one fires during a blend the endpoints just merge
+  const fdg = fidget.value * pose.blend;
+  if (lUpper) lUpper.rotation.set(fdg * -0.2, -uY, -uZ, 'ZXY');
+  if (rUpper) rUpper.rotation.set(fdg * 0.2, uY, uZ, 'ZXY');
+  if (lLower) lLower.rotation.set(0, -lY, -lZ, 'ZXY');
+  if (rLower) rLower.rotation.set(0, lY, lZ, 'ZXY');
+  if (lHand) lHand.rotation.set(0, 0, -handR, 'ZXY');
+  if (rHand) rHand.rotation.set(0, 0, handR, 'ZXY');
+  // fidget: hands busy at the sleeves/hem while engaged — real people don't stand perfectly still
+  if (fdg > 0.01) {
+    const wig = Math.sin(now * 0.006) * 0.04 * fdg;
+    if (lLower) lLower.rotation.y += wig;
+    if (rLower) rLower.rotation.y -= wig;
+    if (lHand) lHand.rotation.z += wig * 0.8;
+    if (rHand) rHand.rotation.z -= wig * 0.8;
+  }
+
+  // ── breathing, weight shifts & body sway ─────────────
+  if (now > weightShift.nextAt) {
+    weightShift.nextAt = now + 7000 + Math.random() * 8000;
+    weightShift.target = (Math.random() - 0.5) * 0.05;
+  }
+  weightShift.x += (weightShift.target - weightShift.x) * (1 - Math.exp(-delta * 1.2));
+  if (hips) {
+    hips.position.x = weightShift.x;
+    hips.rotation.y = weightShift.x * 2.2;         // pelvis yaws toward the loaded leg
+  }
+  if (chest) chest.rotation.y -= weightShift.x * 1.1;   // chest counter-rotates for balance
+  // breathing: single phase accumulator — slower & deeper as she winds down
+  breathT += delta * (0.21 - 0.075 * drowsyAmt - 0.085 * sleepAmt + 0.1 * (avatarState === 'speaking' ? e : 0));
+  const breathAmp = 1 + 0.7 * sleepAmt;
+  if (spine) {
+    spine.rotation.x = Math.sin(breathT) * 0.014 * breathAmp - 0.006;
+    spine.rotation.z = -weightShift.x * 1.5 + noise1(t * 0.11, 4) * 0.008 * (1 - sleepAmt);
+  }
+  if (chest) {
+    chest.rotation.x = Math.sin(breathT + 0.7) * 0.011 * breathAmp;
+    chest.rotation.z = noise1(t * 0.09, 7) * 0.012 * (1 - sleepAmt);
+  }
+
+  // gentle arm sway — livelier while speaking, quiets down as she winds down
+  const swayAmp = (0.03 + e * 0.05) * Math.max(0, 1 - 0.6 * drowsyAmt - 0.95 * sleepAmt);
+  const swayL = noise1(t * 0.5, 11) * swayAmp;
+  const swayR = noise1(t * 0.5, 23) * swayAmp;
+  if (avatarState !== 'thinking') {
+    if (lUpper) { lUpper.rotation.y += swayL; lUpper.rotation.z += swayL * 0.4; }
+    if (rUpper) { rUpper.rotation.y += swayR; rUpper.rotation.z += swayR * 0.4; }
+    if (lLower) lLower.rotation.y += Math.sin(t * 0.9) * 0.05;
+    if (rLower) rLower.rotation.y += Math.sin(t * 0.9 + 1.3) * 0.05;
+  }
+
+  if (avatarState === 'thinking') {
+    // pondering: right elbow folds so her hand rests at her chin, gently bobbing
+    const bob = Math.sin(t * 1.1) * 0.06;
+    if (rUpper) rUpper.rotation.set(0, 0.3, 0.9, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0, -1.4 + bob, 'ZXY');
+    if (rHand) rHand.rotation.set(0, 0, 0.3, 'ZXY');
+  }
+
+  // ── emotional body language ───────────────────────────
+  const eb = emotionBlend;   // 1 while the emotion is fresh, fades to 0
+  const slouchVal = (emo.slouch || 0) * eb;
+  const poutVal = (emo.pout ? 1 : 0) * eb;
+  if (emo.bounce && eb > 0) {
+    // excited bounce: little hops in the torso
+    const b = Math.abs(Math.sin(t * 6.2)) * emo.bounce * eb;
+    if (hips) hips.position.y = b + G.bounce;
+    if (spine) spine.rotation.x += -b * 0.6;
+  } else if (hips) {
+    hips.position.y = G.bounce;
+  }
+  if (slouchVal > 0) {
+    // sad/sleepy slump: chest caves
+    if (spine) spine.rotation.x += 0.1 * slouchVal;
+    if (chest) chest.rotation.x += 0.07 * slouchVal;
+  }
+  if (lUpper) lUpper.rotation.z -= 0.12 * poutVal;   // annoyed: arms tighten inward
+  if (rUpper) rUpper.rotation.z += 0.12 * poutVal;
+  if (spine && emo.lean) spine.rotation.x += emo.lean * eb * 0.2;    // forward lean (fury) / lean back (disgust)
+  if (G.armShake > 0) {   // laughter shoulder shake / sleep twitches
+    const sh = Math.sin(now * 0.042) * G.armShake;
+    if (lUpper) lUpper.rotation.z += sh;
+    if (rUpper) rUpper.rotation.z += sh;
+  }
+  if (G.waveR > 0) {      // friendly wave: right arm up, forearm oscillates
+    if (rUpper) rUpper.rotation.set(0, 0.3, 1.08 - 1.45 * G.waveR, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0, -0.35 + Math.sin(now * 0.014) * 0.3 * G.waveR, 'ZXY');
+    if (rHand) rHand.rotation.set(0, 0, Math.sin(now * 0.014 + 0.6) * 0.3 * G.waveR, 'ZXY');
+  }
+  // ── body-gesture poses (normalized bones: ±Z swings the arm down/up, ±Y fwd/back) ──
+  if (G.splayL > 0.01 || G.splayR > 0.01) {   // shrug / stretch: arms out, palms up, shoulders rise
+    if (lUpper) lUpper.rotation.set(0, -0.5 * G.splayL, -1.08 + 0.5 * G.splayL, 'ZXY');
+    if (rUpper) rUpper.rotation.set(0, 0.5 * G.splayR, 1.08 - 0.5 * G.splayR, 'ZXY');
+    if (lLower) lLower.rotation.set(0, -0.1, -0.12, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0.1, 0.12, 'ZXY');
+    if (lHand) lHand.rotation.set(0, 0, -0.3 * G.splayL, 'ZXY');   // palms turn up
+    if (rHand) rHand.rotation.set(0, 0, 0.3 * G.splayR, 'ZXY');
+    if (chest) chest.rotation.z += 0.03 * ((G.splayL + G.splayR) / 2);   // shoulder shrug
+  }
+  if (G.palmR > 0.01) {     // facepalm: right hand to the forehead, head sinks into it
+    if (rUpper) rUpper.rotation.set(0.55 * G.palmR, 0.25 * G.palmR, 1.55 * G.palmR, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0, -1.65 * G.palmR, 'ZXY');
+    if (rHand) rHand.rotation.set(0, 0, 0.4 * G.palmR, 'ZXY');
+  }
+  if (G.palmL > 0.01 || G.palmR > 0.01) {   // recoil: both palms pushed out front
+    if (lUpper) lUpper.rotation.set(-0.5 * G.palmL, -0.2 * G.palmL, -0.5 * G.palmL, 'ZXY');
+    if (rUpper) rUpper.rotation.set(-0.5 * G.palmR, 0.2 * G.palmR, 0.5 * G.palmR, 'ZXY');
+    if (lLower) lLower.rotation.set(0, -0.1, -0.9 * G.palmL, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0.1, 0.9 * G.palmR, 'ZXY');
+    if (lHand) lHand.rotation.set(0, 0, -0.25 * G.palmL, 'ZXY');   // palms face outward
+    if (rHand) rHand.rotation.set(0, 0, 0.25 * G.palmR, 'ZXY');
+  }
+  if (G.clap > 0.01) {      // clapping: forearms pulse toward each other in front of the chest
+    const pulse = 0.85 + 0.15 * Math.sin(now * 0.022);
+    if (lUpper) lUpper.rotation.set(-0.5 * G.clap, -0.35 * G.clap, -0.75 * G.clap, 'ZXY');
+    if (rUpper) rUpper.rotation.set(-0.5 * G.clap, 0.35 * G.clap, 0.75 * G.clap, 'ZXY');
+    if (lLower) lLower.rotation.set(0, -0.45 * G.clap * pulse, -0.8 * G.clap, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0.45 * G.clap * pulse, 0.8 * G.clap, 'ZXY');
+  }
+  if (G.pumpR > 0.01) {     // fist pump: right arm thrusts up, small victory pulses
+    const pulse = 1 + 0.08 * Math.sin(now * 0.02);
+    if (rUpper) rUpper.rotation.set(0, 0.2, (1.08 - 2.05 * G.pumpR) * pulse, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0, -0.45 * G.pumpR, 'ZXY');   // fist clenched-ish
+    if (rHand) rHand.rotation.set(0, 0, 0.5 * G.pumpR, 'ZXY');
+  }
+  if (G.chestR > 0.01) {    // hands to the chest (touched / love)
+    if (lUpper) lUpper.rotation.set(0.5 * G.chestR, -0.25 * G.chestR, -0.35 * G.chestR, 'ZXY');
+    if (rUpper) rUpper.rotation.set(0.5 * G.chestR, 0.25 * G.chestR, 0.35 * G.chestR, 'ZXY');
+    if (lLower) lLower.rotation.set(0, -0.5 * G.chestR, -1.0 * G.chestR, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0.5 * G.chestR, 1.0 * G.chestR, 'ZXY');
+  }
+  if (G.pinchR > 0.01) {    // fingers to the nose bridge (deep thought / worry)
+    if (rUpper) rUpper.rotation.set(0.45 * G.pinchR, 0.3 * G.pinchR, 1.2 * G.pinchR, 'ZXY');
+    if (rLower) rLower.rotation.set(0, 0, -1.85 * G.pinchR, 'ZXY');
+  }
+  if (G.beatR > 0.01) {     // speech beat: right forearm flicks up-out on the word
+    if (rUpper) rUpper.rotation.y += 0.45 * G.beatR;
+    if (rUpper) rUpper.rotation.z += 0.35 * G.beatR;
+    if (rLower) rLower.rotation.y += 0.5 * G.beatR;
+    if (rHand) rHand.rotation.z += 0.25 * G.beatR;
+  }
+  if (G.bodyZ !== 0 && spine) spine.rotation.x += G.bodyZ;   // torso recoil / stretch
+
+  // ── gaze: cursor tracking + autonomous glances ───────
+  const cursorWanted = (now - lastMouseMoveAt < 2600 && avatarState !== 'thinking') ? Math.max(0, 1 - drowsyAmt - sleepAmt) : 0;
+  cursorInfluence += (cursorWanted - cursorInfluence) * (1 - Math.exp(-delta * 2.5));
+
+  if (now > nextSaccadeAt) {
+    nextSaccadeAt = now + 1800 + Math.random() * 4200;
+    saccade.yaw = (Math.random() - 0.5) * (avatarState === 'idle' ? 18 : 9);
+    saccade.pitch = (Math.random() - 0.5) * 8;
+  }
+
+  // head pose target per state (radians)
+  let tYaw, tPitch, tRoll;
+  if (avatarState === 'thinking') {
+    // pondering: head tips to the side, eyes wander up and away
+    tYaw = E(9) + Math.sin(t * 0.3) * E(5);
+    tPitch = -E(3) + Math.sin(t * 0.45) * E(2.5);
+    tRoll = E(11) + Math.sin(t * 0.26) * E(3.5);
+  } else if (avatarState === 'listening') {
+    // attentive, head tilted toward you
+    tYaw = noise1(t * 0.3, 2) * E(5);
+    tPitch = -E(2) + noise1(t * 0.4, 5) * E(1.5);
+    tRoll = E(8) + noise1(t * 0.35, 8) * E(2);
+  } else if (avatarState === 'speaking') {
+    // lively nodding while talking
+    tYaw = (noise1(t * 0.8, 3) * E(6) + Math.sin(t * 1.6) * E(3)) * e;
+    tPitch = Math.sin(t * 4.6) * E(1.8) * e + Math.sin(t * 0.8) * E(2);
+    tRoll = noise1(t * 0.6, 9) * E(4) * e;
+  } else {
+    // idle: slow, curious drift — flattens out as she zones out / falls asleep
+    const still = 1 - 0.8 * stareAmt - 0.9 * sleepAmt;
+    tYaw = noise1(t * 0.22, 1) * E(9) * still;
+    tPitch = noise1(t * 0.17, 6) * E(4) * still;
+    tRoll = noise1(t * 0.13, 8) * E(3) * still;
+  }
+
+  // follow the cursor — she turns her head toward your pointer
+  tYaw += cursorNX * E(28) * 0.8 * cursorInfluence;
+  tPitch += -cursorNY * E(13) * 0.8 * cursorInfluence;
+  tRoll += -cursorNX * E(4) * cursorInfluence;
+  // emotional head language: chin up (smug/proud), head tilt (confused),
+  // turns away (jealous/embarrassed/disgusted), hangs (sad/sleepy), pout
+  tPitch += (emo.chinUp ? -emo.chinUp : 0) * eb + 0.10 * drowsyAmt + 0.34 * sleepAmt;
+  tRoll += (emo.headRoll || 0) * eb + (emo.headTilt || 0) * eb + 0.12 * sleepAmt;
+  tYaw += (emo.headYaw || 0) * eb;
+  tPitch += G.headP + slouchVal * 0.14;
+  tYaw += G.headY - E(14) * poutVal;
+  tRoll += G.headR;
+  // safety clamps — the neck must never break, no matter what the layers want
+  tYaw = THREE.MathUtils.clamp(tYaw, -0.95, 0.95);
+  tPitch = THREE.MathUtils.clamp(tPitch, -0.5, 0.5);
+  tRoll = THREE.MathUtils.clamp(tRoll, -0.42, 0.42);
+
+  // spring-damped head — slightly underdamped, so turns carry weight & a
+  // hint of overshoot, like real motion instead of a faded lerp
+  const k = 60, c = 13;
+  headVel.yaw += ((tYaw - headAim.yaw) * k - headVel.yaw * c) * delta;
+  headAim.yaw += headVel.yaw * delta;
+  headVel.pitch += ((tPitch - headAim.pitch) * k - headVel.pitch * c) * delta;
+  headAim.pitch += headVel.pitch * delta;
+  headVel.roll += ((tRoll - headAim.roll) * k - headVel.roll * c) * delta;
+  headAim.roll += headVel.roll * delta;
+
+  if (neck) neck.rotation.set(headAim.pitch * 0.35, headAim.yaw * 0.35, headAim.roll * 0.35);
+  if (head) head.rotation.set(headAim.pitch * 0.65, headAim.yaw * 0.65, headAim.roll * 0.65);
+  if (chest) chest.rotation.y += headAim.yaw * 0.1;   // torso joins the big turns (balance counter-rotation already in)
+
+  // eyes: fast, they lead the head (VRM lookAt drives the eye bones)
+  if (gazeTarget && camera) {
+    if (avatarState === 'thinking') {
+      // pondering: gaze drifts up and away, ignoring the cursor
+      gazeTarget.position.set(
+        camera.position.x - 0.6 + noise1(t * 0.4, 41) * 0.08,
+        camera.position.y + 0.6,
+        camera.position.z - 0.3
+      );
+    } else {
+      camera.getWorldDirection(_dir);
+      _right.crossVectors(_dir, camera.up).normalize();
+      _up.crossVectors(_right, _dir).normalize();
+      // attention point: camera + cursor lead + saccades (fades out asleep)
+      const attn = 1 - sleepAmt;
+      gazeTarget.position.copy(camera.position)
+        .addScaledVector(_right, cursorNX * 0.75 * cursorInfluence * attn)
+        .addScaledVector(_up, -cursorNY * 0.45 * cursorInfluence * attn)
+        .addScaledVector(_dir, 0.8);
+      gazeTarget.position.addScaledVector(_right, (noise1(t * 1.7, 31) * 0.05 + saccade.yaw * 0.004) * attn);
+      gazeTarget.position.addScaledVector(_up, (noise1(t * 1.3, 37) * 0.03 + saccade.pitch * 0.003) * attn);
+      // speaker gaze aversion: mid-sentence glances aside, like she's fishing for the next word
+      if (avatarState === 'speaking' && now > speakGlanceUntil) {
+        if (Math.random() < 0.0016) {            // ≈ every 10s of talking on average, checked per frame
+          speakGlanceUntil = now + 900 + Math.random() * 1100;
+          speakGlanceDir = Math.random() < 0.5 ? -1 : 1;
+        }
+      }
+      if (now < speakGlanceUntil) {
+        gazeTarget.position.addScaledVector(_right, 0.9 * speakGlanceDir);   // brief look aside while talking
+      }
+      // zone-out stare & emotional side-eye (jealous/embarrassed/disgusted):
+      // swing the attention point off-camera so her eyes drift away from you
+      const away = Math.max(G.gazeAway, (emo.gazeAway || 0) * eb, stareAmt * 0.9,
+                            now < gazeAwayUntil ? 0.85 : 0);   // sad/embarrassed: won't meet your eyes
+      if (away > 0.01) {
+        _awayPoint.set(camera.position.x + 2.6 * (weightShift.x >= 0 ? 1 : -1), camera.position.y + 0.25, camera.position.z - 1.6);
+        gazeTarget.position.lerp(_awayPoint, Math.min(1, away));
+      }
+    }
+  }
+
+  // ── blinking (occasional double-blinks) ───────────────
+  let blinkPulse = 0;
+  const blinkDur = 0.28 * (1 + 1.1 * drowsyAmt + 1.6 * sleepAmt);   // slow-motion eyelids when winding down
+  if (blinkPhase < 0 && now > nextBlinkAt) {
+    blinkPhase = 0;
+    // drowsy: frequent heavy blinks; awake: occasional double-blink
+    nextBlinkAt = now + (drowsyAmt > 0.5 ? 900 + Math.random() * 1600 : Math.random() < 0.18 ? 170 : 2200 + Math.random() * 3400);
+  }
+  if (blinkPhase >= 0) {
+    blinkPhase += delta / blinkDur;
+    const p = Math.min(blinkPhase, 1);
+    blinkPulse = p < 0.45 ? p / 0.45 : (1 - p) / 0.55;
+    if (blinkPhase >= 1) blinkPhase = -1;
+  }
+  // blink after a big gaze shift — the human tell when eyes travel
+  const gazeMoved = Math.abs(tYaw - lastGazeYaw);   // tYaw already computed above this block
+  if (gazeMoved > 0.35 && blinkPhase < 0 && nextBlinkAt > now + 300) {
+    nextBlinkAt = now + 60 + Math.random() * 80;   // pull the next blink closer
+  }
+  lastGazeYaw = tYaw;
+
+  // ── facial expressions: emotion engine + state flavor ─
+  // emotion-driven face targets (fade in/out smoothly via emoCur)
+  const et = {
+    joy: emo.joy || 0, smile: emo.smile || 0, spread: emo.spread || 0,
+    browJ: emo.browJ || 0, browS: emo.browS || 0, browSur: emo.browSur || 0, browAngry: emo.browAngry || 0,
+    mouthU: emo.mouthU || 0, mouthD: emo.mouthD || 0, mouthS: emo.mouthS || 0, mouthO: emo.mouthO || 0,
+    sorrow: emo.sorrow || 0, angry: emo.angry || 0, squint: emo.squint || 0,
+    half: emo.half || 0, winkL: emo.winkL || 0, winkR: emo.winkR || 0, mouthA: 0,
+  };
+
+  // state flavor layered on top (stronger when no fresh emotion)
+  const sf = 0.45 + 0.55 * (1 - emotionBlend);
+  if (avatarState === 'speaking') { et.joy = Math.max(et.joy, 0.45 * sf); et.browJ = Math.max(et.browJ, 0.25 * sf); }
+  else if (avatarState === 'listening') { et.spread = Math.max(et.spread, 0.4 * sf); et.browSur = Math.max(et.browSur, 0.25 * sf); }
+  else if (avatarState === 'thinking') { et.squint = Math.max(et.squint, 0.35); et.browS = Math.max(et.browS, 0.35); et.mouthS = Math.max(et.mouthS, 0.35); }
+  else { et.joy = Math.max(et.joy, 0.25 * sf * (1 - stareAmt) * (1 - sleepAmt)); et.browJ = Math.max(et.browJ, 0.1 * sf); }   // idle smile (fades when zoning out / asleep)
+
+  // micro-expressions: stray brow raises while relaxed
+  if (now > microNextAt) {
+    microNextAt = now + 3500 + Math.random() * 6000;
+    micro.target = Math.random() < 0.6 ? 0.2 + Math.random() * 0.3 : 0;
+  }
+  micro.value += (micro.target - micro.value) * (1 - Math.exp(-delta * 5));
+  if (avatarState !== 'speaking' && avatarState !== 'thinking') {
+    et.browSur = Math.max(et.browSur, micro.value * sf);
+  }
+
+  // momentary emotional flashes (e.g. surprise on errors)
+  if (emotionFlash && now > emotionFlash.until) emotionFlash = null;
+  if (emotionFlash && emotionFlash.name === 'surprised') {
+    et.spread = 0.6; et.browSur = 0.7; et.joy = 0; et.smile = 0; et.squint = 0;
+  }
+
+  // ease all face channels toward their targets
+  const kf = 1 - Math.exp(-delta * 7);
+  for (const k of Object.keys(emoCur)) emoCur[k] += (et[k] - emoCur[k]) * kf;
+
+  // final weights = eased emotion ∨ gesture override ∨ idle-phase additions (max merge)
+  const W = Object.assign({}, emoCur);
+  const mx = (k, v) => { W[k] = Math.max(W[k] || 0, v); };
+  mx('joy', G.joy); mx('smile', G.smile || 0); mx('spread', G.spread); mx('browJ', G.browJ);
+  mx('browS', G.browS); mx('browSur', G.browSur); mx('browAngry', G.browAngry);
+  mx('mouthU', G.mouthU); mx('mouthD', G.mouthD); mx('mouthS', G.mouthS); mx('mouthO', G.mouthO);
+  mx('sorrow', G.sorrow); mx('angry', G.angry); mx('squint', G.squint);
+  mx('half', drowsyAmt * 0.5 + sleepAmt * 0.4);
+  mx('mouthS', drowsyAmt * 0.2);
+  mx('sorrow', sleepAmt * 0.1);
+
+  const halfW = Math.min(1, W.half);
+  let blinkW = Math.max(blinkPulse, W.squint, sleepAmt * 0.95);
+  if (!morphOK(MORPH.half)) blinkW = Math.max(blinkW, halfW * 0.55);   // fold lids into blink when the Half morph is missing
+
+  applyMorph(MORPH.joy, W.joy);
+  applyMorph(MORPH.smile, W.smile);
+  applyMorph(MORPH.spread, W.spread);
+  applyMorph(MORPH.browJoy, W.browJ);
+  applyMorph(MORPH.browSorrow, W.browS);
+  applyMorph(MORPH.browSurprised, W.browSur);
+  applyMorph(MORPH.browAngry, W.browAngry);
+  applyMorph(MORPH.mouthUp, W.mouthU);
+  applyMorph(MORPH.mouthDown, W.mouthD);
+  applyMorph(MORPH.mouthSmall, W.mouthS);
+  applyMorph(MORPH.visemes[4], W.mouthO);       // surprised open mouth
+  applyMorph(MORPH.sorrow, W.sorrow);
+  applyMorph(MORPH.angry, W.angry);
+  applyMorph(MORPH.blink, blinkW);              // squint / sleep / blinks blend here
+  applyMorph(MORPH.half, halfW);
+  applyMorph(MORPH.winkL, W.winkL);
+  applyMorph(MORPH.winkR, W.winkR);
+  applyMorph(MORPH.surprised, emotionFlash && emotionFlash.name === 'surprised' ? 0.75 : (W.spread > 0.6 ? W.spread * 0.6 : 0));
+
+  // ── lip sync — gated between word boundaries ─────────────
+  // speak() stamps mouthGateAt on SpeechSynthesis word boundaries (and every ~240ms as a
+  // fallback), so the mouth closes during the gaps between words instead of chewing constantly.
+  const mouthOpen = avatarState === 'speaking' && now < mouthGateAt;
+  // fallback for browsers that never fire word boundaries: pulse the gate on a rhythm
+  if (avatarState === 'speaking' && now - mouthGateAt > 450) mouthGateAt = now + 200 + Math.random() * 120;
+  if (mouthOpen && now > nextVisemeAt) {
+    nextVisemeAt = now + 70 + Math.random() * 70;   // swap visemes twice per open segment
+    visemeIndex = Math.floor(Math.random() * MORPH.visemes.length);
+    visemeWeight = 0.45 + Math.random() * 0.55;
+  }
+  MORPH.visemes.forEach((name, i) => {
+    setMorph(name, mouthOpen && i === visemeIndex ? visemeWeight : 0);
+  });
+  // laughing overrides lipsync with a wide open "HA" mouth
+  if (G.mouthA > 0) applyMorph(MORPH.visemes[0], G.mouthA);
+
+  // idle lifecycle label (animation frames overwrite state changes)
+  if (statusLabel && vrm) {
+    statusLabel.textContent = sleepAmt > 0.6 ? 'sleeping' : drowsyAmt > 0.5 ? 'drowsy' : stareAmt > 0.5 ? 'daydreaming' : avatarState;
+  }
+}
+
+function setAvatarState(state) {
+  avatarState = state;
+  markActivity();
+  if (statusLabel && vrm) statusLabel.textContent = state;
+}
+
+// boot the 3D scene
+initAvatar();
+
+// ══════════════════════════════════════════
+// CHAT
+// ══════════════════════════════════════════
+const chatLog = document.getElementById('chat-log');
+const msgInput = document.getElementById('msg-input');
+
+// ── two-state layout: idle ↔ display (glass cards over the avatar) ──
+let lastAddAt = 0, staggerDelay = 0;
+let displayClearTimer = null;
+
+function enterDisplayState() {
+  document.getElementById('app').classList.add('display');
+  scheduleAutoDismiss();
+}
+
+function scheduleAutoDismiss(ms = 20000) {
+  if (displayClearTimer) clearTimeout(displayClearTimer);
+  displayClearTimer = setTimeout(dismissCards, ms);
+}
+
+function dismissCards() {
+  if (displayClearTimer) { clearTimeout(displayClearTimer); displayClearTimer = null; }
+  const app = document.getElementById('app');
+  if (!app.classList.contains('display')) return;
+  const cards = [...chatLog.querySelectorAll('.msg:not(.leaving)')];
+  // staggered float-away exit
+  cards.forEach((el, i) => {
+    el.style.animationDelay = (i * 60) + 'ms';
+    el.classList.add('leaving');
+  });
+  setTimeout(() => {
+    chatLog.innerHTML = '';
+    app.classList.remove('display');
+  }, Math.min(cards.length * 60 + 420, 1200));
+}
+
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissCards(); });
+document.getElementById('cards-clear').addEventListener('click', dismissCards);
+
+function addMessage(text, who, opts = {}) {
+  const div = document.createElement('div');
+  div.className = `msg ${who}`;
+  div.textContent = text;
+  // cascade: cards spawned in a burst stagger by 70ms each
+  const nowT = performance.now();
+  staggerDelay = (nowT - lastAddAt < 200) ? Math.min(staggerDelay + 70, 350) : 0;
+  lastAddAt = nowT;
+  div.style.animationDelay = staggerDelay + 'ms';
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  if (opts.quiet) {
+    // quiet cards don't dim the background (idle stays clean); ephemeral ones fade out on their own
+    if (opts.ephemeral) {
+      setTimeout(() => {
+        div.style.animationDelay = '0ms';
+        div.classList.add('leaving');
+        setTimeout(() => div.remove(), 420);
+      }, opts.ephemeral);
+    }
+  } else {
+    enterDisplayState();
+  }
+}
+
+// ══════════════════════════════════════════
+// VOICE — teen-girl voice engine
+// ══════════════════════════════════════════
+// young-sounding female voices with crisp, confident delivery, best first
+const YOUNG_FEMALE_VOICES = [
+  'natasha', 'sonia', 'aria', 'libby', 'jenny', 'michelle',  // Edge/Windows — crisp, clear
+  'google uk english female', 'google us english',           // Chrome — UK female is sharp & precise
+  'samantha', 'victoria',                                    // macOS
+  'zira', 'eva', 'amber', 'allison', 'ava', 'susan', 'female'
+];
+
+let voices = [];
+let femaleVoice = null;
+let voiceEnabled = localStorage.getItem('vesper_voice') !== 'off';
+let speakToken = 0;
+
+function loadVoices() {
+  voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+  if (!voices.length) return;
+  const saved = localStorage.getItem('vesper_voice_name');
+  femaleVoice =
+    (saved && voices.find(v => v.name === saved)) ||
+    // first preferred young-sounding voice available on this machine
+    YOUNG_FEMALE_VOICES.map(h => voices.find(v => v.name.toLowerCase().includes(h) && /^en/i.test(v.lang))).find(Boolean) ||
+    voices.find(v => /female/i.test(v.name) && /^en/i.test(v.lang)) ||
+    voices.find(v => /^en[-_](GB|US)/i.test(v.lang)) ||
+    voices[0];
+}
+loadVoices();
+if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = loadVoices;
+
+function stopSpeaking() {
+  speakToken++;
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  setAvatarState('idle');
+}
+
+function speak(text, emotion = 'calm') {
+  setEmotion(emotion, 6);              // perform the emotion while speaking, hold ~6s, then fade
+  if (!voiceEnabled || !('speechSynthesis' in window)) return;
+  speakToken++;
+  const myToken = speakToken;
+  window.speechSynthesis.cancel();
+  const emoV = (EMOTIONS[emotion] || EMOTIONS.calm).voice || { pitch: 0, rate: 0 };
+  // body language: the AI's emotion tag plays as a matching gesture / eye behavior
+  performEmotion(emotion);
+  // chunk long replies so browsers don't cut them off mid-sentence
+  const chunks = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
+  let i = 0;
+  const speakNext = () => {
+    if (myToken !== speakToken) return;          // a newer message took over
+    if (i >= chunks.length) { setAvatarState('idle'); return; }
+    const chunk = chunks[i++].trim();
+    if (!chunk) { speakNext(); return; }
+    const utter = new SpeechSynthesisUtterance(chunk);
+    if (femaleVoice) utter.voice = femaleVoice;
+    // "sharp classmate" delivery: mid-to-high register, crisp, confident
+    utter.rate = Math.max(0.5, Math.min(2, 1.12 + emoV.rate + (i % 2 === 0 ? 0.03 : -0.02)));   // brisk, no drag
+    utter.pitch = Math.max(0, Math.min(2, 1.28 + emoV.pitch + Math.random() * 0.06));           // mid-to-high, tight jitter for steady confidence
+    utter.volume = 1.0;
+    utter.onstart = () => {
+      setAvatarState('speaking');
+      scheduleBeat(2 + Math.floor(Math.random() * 3));   // hand beats sprinkled across this chunk
+    };
+    utter.onboundary = (ev) => {                       // real word boundaries — mouth opens only while a word is spoken
+      if (ev.name === undefined || ev.name === 'word') {
+        mouthGateAt = performance.now() + 160 + Math.random() * 90;
+        if (Math.random() < 0.13) fireGesture('beat', { energy: 0.4 + Math.random() * 0.5 });
+      }
+    };
+    utter.onend = speakNext;
+    utter.onerror = () => setAvatarState('idle');
+    window.speechSynthesis.speak(utter);
+  };
+  speakNext();
+}
+
+const voiceBtn = document.getElementById('voice-btn');
+const muteBtn = document.getElementById('mute-btn');
+
+if (!('speechSynthesis' in window)) {
+  voiceBtn.classList.add('disabled');
+  muteBtn.classList.add('disabled');
+} else {
+  voiceBtn.addEventListener('click', () => {
+    if (!voices.length) loadVoices();
+    if (!voices.length) { addMessage('No voices found in this browser yet — try again in a second.', 'vesper'); return; }
+    const fem = voices.filter(v => /female/i.test(v.name) || YOUNG_FEMALE_VOICES.some(h => v.name.toLowerCase().includes(h)));
+    const pool = fem.length ? fem : voices;
+    const idx = pool.findIndex(v => femaleVoice && v.name === femaleVoice.name);
+    femaleVoice = pool[(idx + 1) % pool.length];
+    localStorage.setItem('vesper_voice_name', femaleVoice.name);
+    addMessage(`Voice set to: ${femaleVoice.name}`, 'vesper', { quiet: true, ephemeral: 5000 });
+    speak('This is my voice now.');
+  });
+
+  const updateMuteBtn = () => {
+    muteBtn.textContent = voiceEnabled ? '🔊' : '🔇';
+    muteBtn.title = voiceEnabled ? "Mute Vesper's voice" : "Unmute Vesper's voice";
+    muteBtn.classList.toggle('disabled', !voiceEnabled);
+  };
+  muteBtn.addEventListener('click', () => {
+    voiceEnabled = !voiceEnabled;
+    localStorage.setItem('vesper_voice', voiceEnabled ? 'on' : 'off');
+    if (!voiceEnabled) stopSpeaking();
+    updateMuteBtn();
+  });
+  updateMuteBtn();
+}
+
+async function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text) return;
+  msgInput.value = '';
+  addMessage(text, 'user');
+  reactToText(text);   // instant personality: she reacts to WHAT you typed before the AI replies
+  setAvatarState('thinking');
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text })
+    });
+    const data = await res.json();
+    addMessage(data.reply || '(no reply)', 'vesper');
+    performEmotion(data.emotion || 'calm');   // body language starts with the reply, voice follows
+    speak(data.reply || '', data.emotion || 'calm');
+  } catch (err) {
+    addMessage(`Connection error: ${err}`, 'vesper');
+    flashEmotion('surprised');
+    setAvatarState('idle');
+  }
+}
+
+document.getElementById('send-btn').addEventListener('click', sendMessage);
+msgInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
+
+const fileInput = document.getElementById('file-input');
+document.getElementById('upload-btn').addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  addMessage(`Sent file: ${file.name}`, 'user');
+  const formData = new FormData();
+  formData.append('file', file);
+  setAvatarState('thinking');
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+    const data = await res.json();
+    addMessage(data.reply, 'vesper');
+    performEmotion(data.emotion || 'calm');
+    speak(data.reply, data.emotion || 'calm');
+  } catch (err) {
+    addMessage(`Upload error: ${err}`, 'vesper');
+    flashEmotion('surprised');
+    setAvatarState('idle');
+  } finally {
+    fileInput.value = '';
+  }
+});
+
+document.getElementById('save-btn').addEventListener('click', () => {
+  const lines = [...chatLog.querySelectorAll('.msg')].map(el => {
+    const who = el.classList.contains('user') ? 'You' : 'Vesper';
+    return `${who}: ${el.textContent}`;
+  });
+  const blob = new Blob([lines.join('\n\n')], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `vesper-chat-${Date.now()}.txt`;
+  a.click();
+});
+
+const micBtn = document.getElementById('mic-btn');
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let isListening = false;
+
+if (!SpeechRecognition) {
+  micBtn.classList.add('disabled');
+  micBtn.title = 'Voice input not supported in this browser — use Chrome or Edge';
+} else {
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.interimResults = false;
+  recognition.lang = 'en-US';
+
+  recognition.onstart = () => {
+    isListening = true;
+    micBtn.classList.add('listening');
+    setAvatarState('listening');
+  };
+
+  recognition.onresult = (event) => {
+    const transcript = event.results[0][0].transcript;
+    msgInput.value = transcript;
+    sendMessage();
+  };
+
+  recognition.onerror = (event) => {
+    addMessage(`Voice input error: ${event.error}`, 'vesper');
+    flashEmotion('surprised', 1.2);
+    setAvatarState('idle');
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    micBtn.classList.remove('listening');
+    if (avatarState === 'listening') setAvatarState('idle');
+  };
+
+  micBtn.addEventListener('click', () => {
+    if (isListening) {
+      recognition.stop();
+    } else {
+      stopSpeaking();
+      recognition.start();
+    }
+  });
+}
+
+addMessage('Vesper online. Ready when you are.', 'vesper', { quiet: true, ephemeral: 7000 });
+setEmotion('happy', 4);   // she greets you with a smile
+fireGesture('wave');      // …and a little wave
+</script>
+</body>
+</html>

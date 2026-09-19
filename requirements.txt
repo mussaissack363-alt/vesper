@@ -1,0 +1,4 @@
+requests
+python-dotenv
+flask
+pypdf  # optional — enables PDF reading for uploads

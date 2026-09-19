@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<title>Ella — VTuber Showcase</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 38%, #35233f 0%, #1b1029 46%, #0d0813 100%);
+    color: #f0eaff;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { width: 100%; height: 100%; display: block; }
+
+  #hud {
+    position: fixed; left: 0; right: 0; bottom: 18px; z-index: 4;
+    display: flex; justify-content: center; gap: 10px;
+    pointer-events: none;
+  }
+  .chip {
+    pointer-events: auto; cursor: pointer; user-select: none;
+    font-size: 13px; letter-spacing: 0.4px;
+    padding: 9px 16px; border-radius: 999px;
+    color: #e9e2fb;
+    background: rgba(26, 17, 43, 0.62);
+    border: 1px solid rgba(178, 146, 255, 0.32);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 6px 24px rgba(0,0,0,0.45), 0 0 16px rgba(178,146,255,0.10);
+    transition: border-color 0.15s, color 0.15s, transform 0.1s;
+  }
+  .chip:hover { border-color: #c9b3ff; color: #fff; }
+  .chip:active { transform: scale(0.96); }
+  .chip.on { border-color: #ffd28a; color: #ffe9c2; }
+
+  #state-chip {
+    position: fixed; top: 16px; left: 16px; z-index: 4;
+    font-size: 12px; letter-spacing: 2.5px; text-transform: uppercase;
+    padding: 7px 14px; border-radius: 999px;
+    color: #d8cbfa;
+    background: rgba(26, 17, 43, 0.55);
+    border: 1px solid rgba(178, 146, 255, 0.25);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    pointer-events: none;
+  }
+  #fps-chip {
+    position: fixed; top: 16px; right: 16px; z-index: 4;
+    font-size: 11px; letter-spacing: 1px;
+    padding: 6px 11px; border-radius: 999px;
+    color: #9d8fc4;
+    background: rgba(26, 17, 43, 0.45);
+    border: 1px solid rgba(178, 146, 255, 0.18);
+    pointer-events: none;
+  }
+  #hint {
+    position: fixed; bottom: 66px; left: 0; right: 0; z-index: 3;
+    text-align: center; font-size: 11.5px; letter-spacing: 1px;
+    color: rgba(200, 185, 240, 0.55);
+    pointer-events: none;
+  }
+  #fallback-note {
+    position: fixed; top: 64px; left: 50%; transform: translateX(-50%); z-index: 4;
+    max-width: min(680px, calc(100% - 32px));
+    text-align: center; font-size: 12.5px; letter-spacing: 0.3px;
+    padding: 8px 16px; border-radius: 12px;
+    background: rgba(26, 17, 43, 0.6);
+    border: 1px solid rgba(178, 146, 255, 0.32);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    display: none; pointer-events: none;
+  }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #3a2a5e; border-radius: 3px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three.module.js?v=4",
+    "three/addons/loaders/GLTFLoader.js": "/vendor/GLTFLoader.js?v=4",
+    "../utils/BufferGeometryUtils.js": "/utils/BufferGeometryUtils.js?v=4",
+    "@pixiv/three-vrm": "/vendor/VRMLoaderPlugin.js?v=4"
+  }
+}
+</script>
+<script>
+  // diagnostics: console + status chip + server mirror on hard failures
+  window.__vlog = function (msg, detail) {
+    try { console.log('[showcase]', msg, detail || ''); } catch (e) {}
+    try {
+      const el = document.getElementById('state-chip');
+      if (el && msg) el.textContent = msg;
+    } catch (e) {}
+    try {
+      if (/error|fail|missing/i.test(msg)) {
+        fetch('/api/client-log', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ msg: String(msg).slice(0, 300), detail: String(detail || '').slice(0, 600) })
+        }).catch(() => {});
+      }
+    } catch (e) {}
+  };
+  window.addEventListener('error', (e) => {
+    if (e.message) window.__vlog('window error: ' + e.message, (e.filename || '') + ':' + (e.lineno || ''));
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    if (e.reason) window.__vlog('unhandled rejection', e.reason.message || String(e.reason));
+  });
+</script>
+</head>
+<body>
+  <div id="stage"><canvas id="c"></canvas></div>
+  <div id="state-chip">loading…</div>
+  <div id="fps-chip">— fps</div>
+  <div id="fallback-note"></div>
+  <div id="hint">move your cursor — she follows · space: scene · s: speed · c: cel boost · m: mute</div>
+  <div id="hud">
+    <div class="chip" id="chip-scene">🎭 Scene: scold ⇄ playful</div>
+    <div class="chip" id="chip-speed">⏩ Speed: 1.0×</div>
+    <div class="chip" id="chip-cel">🎨 Cel Boost: off</div>
+    <div class="chip" id="chip-mute">🔊 Voice: on</div>
+  </div>
+  <script type="module" src="/showcase_main.js?v=3"></script>
+</body>
+</html>

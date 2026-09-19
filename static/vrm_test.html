@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>VRM visibility test</title>
+<style>
+  body { margin: 0; background: #1a2433; overflow: hidden; }
+  #log {
+    position: fixed; top: 10px; left: 10px; z-index: 10;
+    font: 13px/1.5 monospace; color: #7dff7d; white-space: pre-wrap;
+    background: rgba(0,0,0,0.6); padding: 10px 14px; border-radius: 8px; max-width: 560px;
+  }
+  #labels {
+    position: fixed; bottom: 14px; left: 0; right: 0; text-align: center;
+    font: 15px monospace; color: #cfd8ea; z-index: 10; text-shadow: 0 1px 3px #000;
+  }
+  #labels b.l { color: #ffd479; } #labels b.r { color: #79c0ff; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three.module.js?v=2",
+    "three/addons/loaders/GLTFLoader.js": "/vendor/GLTFLoader.js?v=2",
+    "../utils/BufferGeometryUtils.js": "/utils/BufferGeometryUtils.js?v=2",
+    "@pixiv/three-vrm": "/vendor/VRMLoaderPlugin.js?v=2"
+  }
+}
+</script>
+</head>
+<body>
+<div id="log">starting…</div>
+<div id="labels"><b class="l">LEFT: MToon (original)</b> &nbsp;|&nbsp; <b class="r">RIGHT: standard material</b></div>
+<canvas id="c"></canvas>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { VRMLoaderPlugin } from '@pixiv/three-vrm';
+
+const logEl = document.getElementById('log');
+const lines = [];
+function log(s) {
+  lines.push(s);
+  if (lines.length > 14) lines.shift();
+  logEl.textContent = lines.join('\n');
+  fetch('/api/client-log', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ msg: 'TEST: ' + s })
+  }).catch(() => {});
+}
+window.addEventListener('error', (e) => { if (e.message) log('ERROR: ' + e.message); });
+window.addEventListener('unhandledrejection', (e) => { if (e.reason) log('REJECT: ' + (e.reason.message || e.reason)); });
+
+const canvas = document.getElementById('c');
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+} catch (e) {
+  log('WEBGL FAILED: ' + e.message);
+  throw e;
+}
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+log('webgl ok');
+
+const sceneL = new THREE.Scene();  // left: original materials
+const sceneR = new THREE.Scene();  // right: overridden materials
+sceneL.background = new THREE.Color(0x24304a);
+sceneR.background = new THREE.Color(0x3a2a24);
+
+const camera = new THREE.PerspectiveCamera(20, 1, 0.1, 50);
+
+for (const [scene, tint] of [[sceneL, 0xfffdf5], [sceneR, 0xffffff]]) {
+  scene.add(new THREE.HemisphereLight(0xfff4e6, 0x445566, 1.6));
+  const key = new THREE.DirectionalLight(0xffffff, 1.5);
+  key.position.set(1, 2, 2);
+  scene.add(key);
+}
+
+let vrm = null;
+
+const loader = new GLTFLoader();
+loader.register((parser) => new VRMLoaderPlugin(parser));
+
+log('loading /model/ella.vrm?v=2 …');
+loader.load('/model/ella.vrm?v=2', (gltf) => {
+  try {
+    vrm = gltf.userData.vrm;
+    log('parsed, vrm=' + !!vrm);
+    if (!vrm) return;
+
+    sceneL.add(vrm.scene);
+
+    // RIGHT: clone with plain standard materials (bypasses MToon shader entirely)
+    const plain = vrm.scene.clone(true);
+    let swapped = 0;
+    plain.traverse((o) => {
+      if (o.isMesh || o.isSkinnedMesh) {
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0xd8b4fe, roughness: 0.6, metalness: 0.05,
+          side: THREE.DoubleSide,
+          skinning: undefined
+        });
+        if (o.isSkinnedMesh) { /* three r164 handles skinning automatically */ }
+        o.material = mat;
+        swapped++;
+      }
+    });
+    sceneR.add(plain);
+    log('right copy: swapped ' + swapped + ' meshes to standard material');
+
+    // wireframe boxes around both copies — if geometry exists but shaders fail,
+    // the boxes will still be visible
+    for (const [scene, color] of [[sceneL, 0x44ff44], [sceneR, 0x44aaff]]) {
+      const target = scene === sceneL ? vrm.scene : plain;
+      const box = new THREE.Box3().setFromObject(target);
+      const size = box.getSize(new THREE.Vector3());
+      const helper = new THREE.Box3Helper(box, color);
+      scene.add(helper);
+      log('box size=' + size.x.toFixed(2) + ',' + size.y.toFixed(2) + ',' + size.z.toFixed(2));
+    }
+
+    // camera framing on head (left scene is the reference)
+    vrm.scene.updateMatrixWorld(true);
+    const head = vrm.humanoid && vrm.humanoid.getNormalizedBoneNode('head');
+    const focus = head ? head.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3(0, 1.2, 0);
+    camera.position.set(focus.x, focus.y + 0.05, focus.z + 2.2);
+    camera.lookAt(focus);
+    log('camera at ' + camera.position.toArray().map(v => v.toFixed(2)).join(',') +
+        ' looking at head ' + focus.toArray().map(v => v.toFixed(2)).join(','));
+
+    log('READY — compare left vs right');
+  } catch (e) {
+    log('LOAD HANDLER ERROR: ' + (e.message || e));
+  }
+}, undefined, (err) => {
+  log('VRM LOAD ERROR: ' + (err && (err.message || err.error)) || String(err));
+});
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (vrm) { try { vrm.update(dt); } catch (e) {} }
+  const w = window.innerWidth;
+  // left half = MToon scene, right half = plain scene
+  const half = Math.floor(w / 2);
+  renderer.setScissorTest(true);
+  renderer.setScissor(0, 0, half, window.innerHeight);
+  renderer.setViewport(0, 0, half, window.innerHeight);
+  renderer.render(sceneL, camera);
+  renderer.setScissor(half, 0, w - half, window.innerHeight);
+  renderer.setViewport(half, 0, w - half, window.innerHeight);
+  renderer.render(sceneR, camera);
+  renderer.setScissorTest(false);
+});
+</script>
+</body>
+</html>
