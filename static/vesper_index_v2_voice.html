@@ -379,6 +379,23 @@ let lastRebootAt = 0;
 let watchdogRT = null;
 let watchdogRTBuf = null;
 let contextCount = 0;
+let confirmBuf = null;
+let watchdogFalseAlarms = 0;
+
+// one-off default-framebuffer confirmation — the pixels the user actually sees.
+// Only runs on strike-3 (rare), so the periodic full-canvas stall risk stays away.
+function confirmVisibleOnDefaultFB() {
+  const gl = renderer.getContext();
+  const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+  if (!w || !h) return 0;
+  const n = w * h * 4;
+  if (!confirmBuf || confirmBuf.length !== n) confirmBuf = new Uint8Array(n);
+  renderer.render(scene, camera);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, confirmBuf);
+  let opaque = 0, total = 0;
+  for (let i = 3; i < n; i += 16) { total++; if (confirmBuf[i] > 200) opaque++; }   // stride 4
+  return opaque / Math.max(1, total);
+}
 
 function watchdogTick(now) {
   if (now < nextWatchdogAt || !vrm || !renderer) return;
@@ -415,15 +432,24 @@ function watchdogTick(now) {
     window.__vlog('watchdog probe error', e && e.message);
   }
 
-  // 3) dead pixels on a live context — compositing glitch; wait for 3 strikes
+  // 3) dead pixels on a live context — wait for 3 strikes, then CONFIRM on the
+  // default framebuffer before touching anything (RT probes can glitch while
+  // the visible canvas is fine — log evidence showed spurious reboots)
   watchdogFailures++;
   window.__vlog('watchdog: no solid pixels', `strike ${watchdogFailures}/3`);
   if (watchdogFailures >= 3) {
     watchdogFailures = 0;
+    let seen = 0;
+    try { seen = confirmVisibleOnDefaultFB(); } catch (e) { window.__vlog('confirm probe failed', e && e.message); }
+    if (seen > 0.005) {
+      watchdogFalseAlarms++;
+      window.__vlog('watchdog: FALSE ALARM', `default FB shows ${(seen * 100).toFixed(1)}% opaque — RT probe glitch #${watchdogFalseAlarms}, not rebooting`);
+      return;
+    }
     if (window.__vesperStatue) {
-      rebootAvatar('3 consecutive dead probes on a live context');
+      rebootAvatar('3 dead probes + default-FB confirmation: canvas truly dead');
     } else {
-      window.__vlog('watchdog: live model invisible', 're-arming heal cascade');
+      window.__vlog('watchdog: live model invisible (confirmed)', 're-arming heal cascade');
       visCheckDone = false;
       visCheckAt = performance.now() + 800;
     }
