@@ -366,6 +366,26 @@ function rebakeStatues() {
   }
 }
 
+// the old unconditional load-time inverse-bind rebuild, demoted to a cascade
+// tier: on three-vrm 3.x it corrupts good file bind data (re-parented bones)
+function applyInverseBindRepair() {
+  let repaired = 0;
+  vrm.scene.updateMatrixWorld(true);
+  vrm.scene.traverse((obj) => {
+    if (!obj.isSkinnedMesh || !obj.skeleton) return;
+    const sk = obj.skeleton;
+    if (!sk.boneInverses || sk.boneInverses.length !== sk.bones.length) {
+      sk.boneInverses = sk.bones.map(() => new THREE.Matrix4());
+    }
+    for (let i = 0; i < sk.bones.length; i++) {
+      if (sk.bones[i]) sk.boneInverses[i].copy(sk.bones[i].matrixWorld).invert();
+    }
+    obj.bindMode = 'attached';
+    repaired++;
+  });
+  window.__vlog('inverse-bind repair applied', `meshes=${repaired}`);
+}
+
 // ── WATCHDOG v2 — verify pixels with minimal GL disruption. ──
 // Lessons from the logs: a full-canvas readPixels (4MB sync stall) every 15s
 // correlates with context losses on this fragile driver (TDR), and frequent
@@ -577,6 +597,17 @@ function checkVisibility(now) {
     window.__vlog('heal tier 1: pose reset', (frac2 * 100).toFixed(2) + '% pixels');
     if (frac2 > 0.005) { visCheckDone = true; return; }
   } catch (e) { window.__vlog('heal tier 1 failed', e && e.message); }
+
+  // tier 1.5: inverse-bind rebuild — last resort if vanilla skinning failed
+  try {
+    applyInverseBindRepair();
+    vrm.scene.updateMatrixWorld(true);
+    renderer.render(scene, camera);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    frac2 = countOpaque(px) / (w * h);
+    window.__vlog('heal tier 1.5: inverse-bind rebuild', (frac2 * 100).toFixed(2) + '% pixels');
+    if (frac2 > 0.005) { visCheckDone = true; return; }
+  } catch (e) { window.__vlog('heal tier 1.5 failed', e && e.message); }
 
   // tier 2: broken skinning — freeze a static baked copy of every skinned mesh
   try {
@@ -1190,35 +1221,27 @@ function initAvatar() {
         scene.add(vrm.scene);
         window.__vlog('vrm added to scene', 'expressionManager=' + !!(vrm.expressionManager));
 
-        // ── SKINNED-MESH REPAIR (full rebuild) ──
-        // Evidence chain: GPU draws calls=23 tris=57123 yet opaque=0.00%, while the
-        // statue (same geometry, skinning skipped) renders 30% of the screen. So the
-        // skinning matrices are wrong, not the geometry or materials. The model is at
-        // bind pose right now — rebuilding every inverse-bind as matrixWorld⁻¹ makes
-        // skinning collapse to identity at rest, so the rest pose MUST render.
+        // ── SKINNING PREP — trust the file's bind data on the modern stack ──
+        // r170 + three-vrm 3.4: removeUnnecessaryVertices + combineSkeletons are the
+        // officially recommended prep. The old unconditional inverse-bind REBUILD is
+        // what broke live skinning all along: three-vrm re-parents raw bones at load,
+        // so matrixWorld-at-load no longer matches the file's bind pose. The rebuild
+        // now lives in the heal cascade (tier 1.5), only if vanilla rendering fails.
         try { VRMUtils.removeUnnecessaryVertices(vrm.scene); } catch (e) { window.__vlog('rmv-vertices failed', e && e.message); }
         try { VRMUtils.combineSkeletons(vrm.scene); } catch (e) { window.__vlog('combineSkeletons failed', e && e.message); }
-        let repaired = 0; const issues = [];
         vrm.scene.updateMatrixWorld(true);
+        let repaired = 0;
         vrm.scene.traverse((obj) => {
           if (!obj.isSkinnedMesh || !obj.skeleton) return;
           const sk = obj.skeleton;
-          const bones = sk.bones;
-          if (!sk.boneInverses || sk.boneInverses.length !== bones.length) {
-            sk.boneInverses = bones.map(() => new THREE.Matrix4());
-            issues.push('inverses-count-fixed');
+          if (!sk.boneInverses || sk.boneInverses.length !== sk.bones.length) {
+            sk.boneInverses = sk.bones.map(() => new THREE.Matrix4());
           }
-          // full rebuild: file-supplied bind data is evidently wrong — trust the scene graph instead
-          for (let i = 0; i < bones.length; i++) {
-            if (bones[i]) sk.boneInverses[i].copy(bones[i].matrixWorld).invert();
-          }
-          issues.push('binds-rebuilt');
           if (obj.geometry && obj.geometry.attributes.skinWeight) obj.normalizeSkinWeights();
-          obj.bindMode = 'attached';
           obj.frustumCulled = false;
           repaired++;
         });
-        window.__vlog('skinning repair', `meshes=${repaired} ${issues.join('+') || 'counts-ok'}`);
+        window.__vlog('skinning prep', `meshes=${repaired} (file bind data trusted)`);
 
         // ── CPU GROUND-TRUTH PROBE ──
         // Skin one vertex on the CPU with the SAME math the GPU would use. If the
