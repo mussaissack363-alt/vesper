@@ -7,7 +7,7 @@ from groq_brain_v3 import (
     think, think_with_image, read_text_file, DEVICE_TYPE,
     handle_phone_command, handle_pc_command, IMAGE_EXTENSIONS,
     handle_memory_command, mem_recall, mem_count, migrate_firebase_once,
-    last_emotion
+    last_emotion, split_spoken_reply
 )
 
 # emotion keyword fallback for quick command replies that skip the LLM
@@ -87,16 +87,17 @@ def chat():
     if DEVICE_TYPE == 'mobile':
         result = handle_phone_command(user_input)
         if result:
-            return jsonify({'reply': result, 'emotion': _fallback_emotion(result)})
+            return jsonify({'reply': result, 'spoken': result, 'emotion': _fallback_emotion(result)})
 
     if DEVICE_TYPE == 'pc':
         result = handle_pc_command(user_input)
         if result:
-            return jsonify({'reply': result, 'emotion': _fallback_emotion(result)})
+            return jsonify({'reply': result, 'spoken': result, 'emotion': _fallback_emotion(result)})
 
     reply = think(user_input)
     emo = last_emotion() if reply and not reply.startswith(('API error', 'Brain error')) else _fallback_emotion(reply)
-    return jsonify({'reply': reply, 'emotion': emo})
+    spoken, _ = split_spoken_reply(reply)   # TTS gets only the summary; UI renders everything
+    return jsonify({'reply': reply, 'spoken': spoken, 'emotion': emo})
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -116,7 +117,8 @@ def upload():
         mime = 'image/png' if ext == '.png' else 'image/jpeg' if ext in ('.jpg', '.jpeg') else 'image/webp' if ext == '.webp' else 'image/gif'
         reply = think_with_image(question, path, mime)
         emo = last_emotion() if reply and not reply.startswith(('API error', 'Vision error', 'Vision unavailable')) else _fallback_emotion(reply)
-        return jsonify({'reply': reply, 'emotion': emo})
+        spoken, _ = split_spoken_reply(reply)
+        return jsonify({'reply': reply, 'spoken': spoken, 'emotion': emo})
 
     # Text files and PDFs → extract text and think about it
     content = read_text_file(path)
@@ -124,7 +126,8 @@ def upload():
         prompt = question or f"I uploaded the file '{f.filename}'. Here is its content:\n\n{content}\n\nSummarize it and tell me what matters."
         reply = think(prompt)
         emo = last_emotion() if reply and not reply.startswith(('API error', 'Brain error')) else _fallback_emotion(reply)
-        return jsonify({'reply': reply, 'emotion': emo})
+        spoken, _ = split_spoken_reply(reply)
+        return jsonify({'reply': reply, 'spoken': spoken, 'emotion': emo})
 
     return jsonify({'reply': f"Saved \"{f.filename}\", but I can't read that file type yet "
                              f"(supported: images, PDFs, and text/code files)."})

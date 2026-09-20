@@ -767,6 +767,22 @@ VOICE & ATTITUDE — "the sharp classmate" (tsundere):
 - Occasionally drop the guard and show real warmth when he earns it — briefly, then snap back to cool.
 - The attitude is seasoning, never the meal: answers stay accurate, commands still execute, warnings still warn. Utility first, sass second.
 
+RESPONSE LENGTH & FORMAT — she is SPOKEN first, READ second:
+- Default / casual mode: everyday chat, greetings, quick questions, banter, reactions.
+  Keep it concise: 1 to 3 natural sentences. No headers, no bullets, no walls of text.
+- Detailed queries: complex, technical, or multi-step requests (how-to, debugging, explanations,
+  plans, comparisons) get a TWO-PART structured reply in EXACTLY this format:
+
+  Spoken Summary: <1-2 clear, conversational sentences that sound right when read aloud —
+  the distilled takeaway, no markdown inside it>
+  Full Answer: <the detailed breakdown — bullet points, numbered steps, code, specifics —
+  formatted for reading in the chat window>
+
+  Rules for the split: the Spoken Summary must stand alone (no "as I explain below"), never
+  contain lists or code, and never exceed 2 sentences. The Full Answer carries the detail —
+  if the request is trivial, don't force the two-part format; just answer briefly.
+- Never let the Full Answer leak into your voice: the reader only speaks the Spoken Summary.
+
 ABOUT MUSSA:
 - First year BCS student, Semester 2, Dar es Salaam
 - Runs Termux on mobile and an HP EliteBook for PC work
@@ -863,6 +879,37 @@ def build_system_prompt():
     return full_system
 
 LAST_EMO = 'calm'
+
+def split_spoken_reply(reply):
+    """Split a brain reply into (spoken, full).
+
+    'Spoken Summary:' is what the TTS engine + avatar lip-sync get; the complete
+    reply (including the summary) is what the chat UI renders. Robust to casing,
+    markdown headers ('## Spoken Summary'), bold ('**Spoken Summary:**'), and
+    returns the original reply untouched (as both parts) when no marker exists.
+    """
+    if not reply:
+        return reply, reply
+    # [ \t]* (not \s*) in header patterns — \s* would let the match cross the
+    # newline and swallow the Full Answer line into the spoken summary
+    m = re.search(r'^#{0,4}[ \t]*\**[ \t]*spoken summary\**[ \t]*(?:[:\-\u2014\u2013])?[ \t]*(.*?)(?=\n|$)',
+                  reply, re.IGNORECASE)
+    if not m:
+        return reply, reply
+    spoken = re.sub(r'^[\*_`#\-\u2014\u2013:\s]+|[\*_`\s]+$', '', m.group(1)).strip()
+    # spoken continues across soft-wrapped lines until the Full Answer marker
+    rest = reply[m.end():]
+    m2 = re.search(r'^#{0,4}[ \t]*\**[ \t]*full answer\**[ \t]*(?:[:\-\u2014\u2013])?[ \t]*', rest,
+                   re.IGNORECASE | re.MULTILINE)
+    if m2:
+        spoken = (spoken + " " + rest[:m2.start()]).strip()
+        full = rest[m2.end():].strip()
+    else:
+        full = reply.strip()   # marker half-missing: render everything
+    if not spoken:
+        spoken = reply.strip()
+    return spoken, full
+
 
 def parse_and_save_tags(reply):
     global LAST_EMO

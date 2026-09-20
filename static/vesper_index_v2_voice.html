@@ -211,8 +211,18 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { createVesperAnimator } from '/vesper_animator.js?v=1';
 
 window.__vlog('module imports ok');
+
+// ══════════════════════════════════════════
+// VESPER ANIMATOR — fixes + procedural animation module
+// ══════════════════════════════════════════
+// Host-driven mode: the page's emotion engine keeps owning breathing, gaze and
+// blinking; the animator supplies load fixes, the raw→preset morph router,
+// expression easing, the viseme gate (TTS lip sync) and the track sanitizer.
+const animator = createVesperAnimator(THREE);
+animator.setAutonomous(false);
 
 // ══════════════════════════════════════════
 // 3D AVATAR — ella.vrm
@@ -488,6 +498,7 @@ function rebootAvatar(reason) {
   window.__vesperStatue = false;
   faceMeshes.length = 0;
   expressionManager = null;
+  animator.detach();   // drop the disposed vrm so no frame updates a dead scene
   visCheckDone = false;
   statusLabel.textContent = 'rebooting avatar…';
   try { renderer.forceContextLoss(); } catch (e) {}
@@ -1084,6 +1095,7 @@ function updateGestures(now, delta, G) {
 // ── IDLE LIFECYCLE — engaged → staring into the void → drowsy → asleep ──
 let lastActivityAt = performance.now();
 let nextYawnAt = 0, nextTwitchAt = 0;
+let thinkW = 0;                     // thinking-pose blend weight (eased in/out)
 let stareAmt = 0, drowsyAmt = 0, sleepAmt = 0;
 let breathT = 0;
 const headVel = { yaw: 0, pitch: 0, roll: 0 };   // spring velocity for the head
@@ -1134,18 +1146,12 @@ function reactToText(text) {
 }
 
 function setFaceMorphImmediate(name, weight) {
-  // Prefer the VRM expression system when the model declares expressions,
-  // otherwise drive raw morphTargetInfluences on every face mesh primitive.
-  if (expressionManager && expressionManager.getExpression(name)) {
-    expressionManager.setValue(name, weight);
-    return;
-  }
-  for (const mesh of faceMeshes) {
-    const idx = mesh.morphTargetDictionary ? mesh.morphTargetDictionary[name] : undefined;
-    if (idx !== undefined && mesh.morphTargetInfluences) {
-      mesh.morphTargetInfluences[idx] = weight;
-    }
-  }
+  // Routed through the animator's morph router: preset-bound VRoid morphs
+  // (Fcl_EYE_Close, Fcl_MTH_*, Fcl_ALL_*) are cleared + re-applied by the
+  // expression manager on every vrm.update(), so raw influence writes to them
+  // are wiped each frame — the router writes the owning preset weight instead.
+  // Unbound morphs go straight to morphTargetInfluences as before.
+  animator.setMorph(name, weight);
 }
 
 function initAvatar() {
@@ -1187,6 +1193,55 @@ function initAvatar() {
   const rim = new THREE.PointLight(0xffc890, 1.8, 6);
   rim.position.set(-0.8, 1.5, -1.2);
   scene.add(rim);
+
+  // ── 3D BACKGROUND — warm gradient dome + soft floor + fog ──────────
+  // Big inverted sphere with a vertex-height gradient: warm glow behind her,
+  // deep plum at the edges. Unlit shader — zero texture pipeline risk.
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(14, 32, 24),
+    new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false,
+      vertexShader: `
+        varying vec3 vPos;
+        void main() {
+          vPos = position;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        varying vec3 vPos;
+        void main() {
+          float h = normalize(vPos).y;                          // -1..1
+          vec3 glow  = vec3(0.24, 0.17, 0.13);                  // warm amber halo
+          vec3 mid   = vec3(0.10, 0.07, 0.12);                  // dusty plum
+          vec3 edge  = vec3(0.045, 0.03, 0.07);                 // deep violet-black
+          vec3 col = mix(glow, mid, smoothstep(0.45, -0.05, h));
+          col = mix(col, edge, smoothstep(0.0, -0.7, h));
+          // subtle vignette darkening toward the horizon line
+          col *= 1.0 - 0.18 * smoothstep(0.1, -0.2, h);
+          gl_FragColor = vec4(col, 1.0);
+        }`,
+    })
+  );
+  scene.add(dome);
+
+  // soft floor disc catching the key light — grounds her instead of floating
+  const floor = new THREE.Mesh(
+    new THREE.CircleGeometry(3.2, 48),
+    new THREE.MeshStandardMaterial({ color: 0x1a1220, roughness: 0.9, metalness: 0.05 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = 0;
+  scene.add(floor);
+
+  // depth fade so the dome edge and floor rim melt into darkness
+  scene.fog = new THREE.FogExp2(0x0a0612, 0.055);
+
+  // ambient fill so the background reads evenly, not just the avatar
+  const ambient = new THREE.AmbientLight(0x8a76a8, 0.35);
+  scene.add(ambient);
+  const fill = new THREE.DirectionalLight(0xb9a8ff, 0.28);
+  fill.position.set(-1.2, 1.0, 0.6);
+  scene.add(fill);
 
   // soft glow disc under her — pure fragment-shader math (no texture, immune to texture pipeline bugs)
   const disc = new THREE.Mesh(
@@ -1230,6 +1285,9 @@ function initAvatar() {
         try { VRMUtils.removeUnnecessaryVertices(vrm.scene); } catch (e) { window.__vlog('rmv-vertices failed', e && e.message); }
         try { VRMUtils.combineSkeletons(vrm.scene); } catch (e) { window.__vlog('combineSkeletons failed', e && e.message); }
         vrm.scene.updateMatrixWorld(true);
+        // module fixes: frustum-culling sweep + springBoneManager.reset() so
+        // hair/coat springs start at rest instead of exploding on load snap
+        animator.attach(vrm, camera);
         let repaired = 0;
         vrm.scene.traverse((obj) => {
           if (!obj.isSkinnedMesh || !obj.skeleton) return;
@@ -1410,8 +1468,12 @@ function tick() {
 
   if (vrm) {
     try {
-      animateAvatar(delta, t);
-      vrm.update(delta);
+      // canonical frame order: clips → procedural posing → animator (sanitize +
+      // face) → vrm.update (rig transfer + lookAt/expressions/springs) → render
+      animator.updateMixer(delta);   // 1. retargeted clips set the base pose
+      animateAvatar(delta, t);       // 2. procedural rotation-only posing
+      animator.update(delta);        // 3. pose sanitize + expressions/visemes
+      vrm.update(delta);             // 4. rig→raw transfer + lookAt/expressions/spring bones
       if (window.__vesperStatue) rebakeStatues();   // pose the skeleton, then skin on CPU
     } catch (err) {
       // never let one bad frame kill the render loop permanently
@@ -1524,10 +1586,14 @@ function animateAvatar(delta, t) {
   }
   weightShift.x += (weightShift.target - weightShift.x) * (1 - Math.exp(-delta * 1.2));
   if (hips) {
-    hips.position.x = weightShift.x;
-    hips.rotation.y = weightShift.x * 2.2;         // pelvis yaws toward the loaded leg
+    // rotation-only weight shift: pelvis yaws AND rolls toward the loaded leg.
+    // Never mutate .position on body bones — it fights vrm.update()'s normalized
+    // rig transfer and deforms the mesh.
+    hips.rotation.y = weightShift.x * 2.2;
+    hips.rotation.z = weightShift.x * 1.4;
   }
-  if (chest) chest.rotation.y -= weightShift.x * 1.1;   // chest counter-rotates for balance
+  // chest yaw counter-rotation is folded into the ABSOLUTE write in the gaze
+  // section below — an accumulating -= here winds up forever (360° spin)
   // breathing: single phase accumulator — slower & deeper as she winds down
   breathT += delta * (0.21 - 0.075 * drowsyAmt - 0.085 * sleepAmt + 0.1 * (avatarState === 'speaking' ? e : 0));
   const breathAmp = 1 + 0.7 * sleepAmt;
@@ -1551,12 +1617,16 @@ function animateAvatar(delta, t) {
     if (rLower) rLower.rotation.y += Math.sin(t * 0.9 + 1.3) * 0.05;
   }
 
-  if (avatarState === 'thinking') {
-    // pondering: right elbow folds so her hand rests at her chin, gently bobbing
-    const bob = Math.sin(t * 1.1) * 0.06;
-    if (rUpper) rUpper.rotation.set(0, 0.3, 0.9, 'ZXY');
-    if (rLower) rLower.rotation.set(0, 0, -1.4 + bob, 'ZXY');
-    if (rHand) rHand.rotation.set(0, 0, 0.3, 'ZXY');
+  // pondering pose blends in/out smoothly (thinkW) instead of snapping —
+  // a hard .set() mid-gesture reads as a glitch
+  if (avatarState === 'thinking') thinkW += (1 - thinkW) * (1 - Math.exp(-delta * 4));
+  else thinkW += (0 - thinkW) * (1 - Math.exp(-delta * 4));
+  if (thinkW > 0.001) {
+    // right elbow folds so her hand rests at her chin, gently bobbing
+    const bob = Math.sin(t * 1.1) * 0.06 * thinkW;
+    if (rUpper) { rUpper.rotation.y += (0.3 - rUpper.rotation.y) * thinkW; rUpper.rotation.z += (0.9 - rUpper.rotation.z) * thinkW; }
+    if (rLower) { rLower.rotation.y += (0 - rLower.rotation.y) * thinkW; rLower.rotation.z += (-1.4 + bob - rLower.rotation.z) * thinkW; }
+    if (rHand) rHand.rotation.z += (0.3 - rHand.rotation.z) * thinkW;
   }
 
   // ── emotional body language ───────────────────────────
@@ -1564,12 +1634,13 @@ function animateAvatar(delta, t) {
   const slouchVal = (emo.slouch || 0) * eb;
   const poutVal = (emo.pout ? 1 : 0) * eb;
   if (emo.bounce && eb > 0) {
-    // excited bounce: little hops in the torso
+    // excited bounce: pelvis pitch pulses + spine recoil (rotation-only —
+    // position edits on body bones are forbidden by the pose contract)
     const b = Math.abs(Math.sin(t * 6.2)) * emo.bounce * eb;
-    if (hips) hips.position.y = b + G.bounce;
+    if (hips) hips.rotation.x = -b * 2.2 - G.bounce * 2.0;
     if (spine) spine.rotation.x += -b * 0.6;
   } else if (hips) {
-    hips.position.y = G.bounce;
+    hips.rotation.x = -G.bounce * 2.0;
   }
   if (slouchVal > 0) {
     // sad/sleepy slump: chest caves
@@ -1643,6 +1714,15 @@ function animateAvatar(delta, t) {
   }
   if (G.bodyZ !== 0 && spine) spine.rotation.x += G.bodyZ;   // torso recoil / stretch
 
+  // ── hand poses — clamped + damped by the animator every frame ──
+  // gesture-active hands pick their pose; everything else rests naturally
+  if (G.waveR > 0.1) animator.setHandTargets('wave', { spread: 0.6 * G.waveR });
+  else if (G.pumpR > 0.1) animator.setHandTargets('fist');
+  else if (G.chestR > 0.1) animator.setHandTargets('heart');
+  else if (G.palmL > 0.1 || G.palmR > 0.1) animator.setHandTargets('open');
+  else if (avatarState === 'thinking') animator.setHandTargets('relaxed');
+  else animator.setHandTargets('relaxed');
+
   // ── gaze: cursor tracking + autonomous glances ───────
   const cursorWanted = (now - lastMouseMoveAt < 2600 && avatarState !== 'thinking') ? Math.max(0, 1 - drowsyAmt - sleepAmt) : 0;
   cursorInfluence += (cursorWanted - cursorInfluence) * (1 - Math.exp(-delta * 2.5));
@@ -1707,7 +1787,10 @@ function animateAvatar(delta, t) {
 
   if (neck) neck.rotation.set(headAim.pitch * 0.35, headAim.yaw * 0.35, headAim.roll * 0.35);
   if (head) head.rotation.set(headAim.pitch * 0.65, headAim.yaw * 0.65, headAim.roll * 0.65);
-  if (chest) chest.rotation.y += headAim.yaw * 0.1;   // torso joins the big turns (balance counter-rotation already in)
+  // torso yaw: head-follow + weight-shift counter-rotation, written as ONE
+  // absolute value. Accumulating += here integrates the head-yaw state forever
+  // and spins her a full circle — the 360° bug.
+  if (chest) chest.rotation.y = headAim.yaw * 0.1 - weightShift.x * 1.1;
 
   // eyes: fast, they lead the head (VRM lookAt drives the eye bones)
   if (gazeTarget && camera) {
@@ -1843,22 +1926,17 @@ function animateAvatar(delta, t) {
   applyMorph(MORPH.winkR, W.winkR);
   applyMorph(MORPH.surprised, emotionFlash && emotionFlash.name === 'surprised' ? 0.75 : (W.spread > 0.6 ? W.spread * 0.6 : 0));
 
-  // ── lip sync — gated between word boundaries ─────────────
-  // speak() stamps mouthGateAt on SpeechSynthesis word boundaries (and every ~240ms as a
-  // fallback), so the mouth closes during the gaps between words instead of chewing constantly.
-  const mouthOpen = avatarState === 'speaking' && now < mouthGateAt;
-  // fallback for browsers that never fire word boundaries: pulse the gate on a rhythm
-  if (avatarState === 'speaking' && now - mouthGateAt > 450) mouthGateAt = now + 200 + Math.random() * 120;
-  if (mouthOpen && now > nextVisemeAt) {
-    nextVisemeAt = now + 70 + Math.random() * 70;   // swap visemes twice per open segment
-    visemeIndex = Math.floor(Math.random() * MORPH.visemes.length);
-    visemeWeight = 0.45 + Math.random() * 0.55;
+  // ── lip sync — the animator's viseme gate drives the mouth ──────────
+  // speak() opens the gate on TTS start / word boundaries; the animator pulses
+  // visemes at syllable rhythm while open and eases the mouth shut when closed.
+  // Fallback for browsers that never fire word boundaries: hold the gate on a rhythm.
+  if (avatarState === 'speaking' && now - mouthGateAt > 450) {
+    mouthGateAt = now + 200 + Math.random() * 120;
+    animator.setVisemeGate(true);
   }
-  MORPH.visemes.forEach((name, i) => {
-    setMorph(name, mouthOpen && i === visemeIndex ? visemeWeight : 0);
-  });
-  // laughing overrides lipsync with a wide open "HA" mouth
-  if (G.mouthA > 0) applyMorph(MORPH.visemes[0], G.mouthA);
+  // laughing overrides lipsync with a wide open "HA" mouth through the same
+  // eased channel — the gate yields while a viseme target is active
+  if (G.mouthA > 0.01) animator.driveVisemes('aa', 0.45 + 0.55 * G.mouthA);
 
   // idle lifecycle label (animation frames overwrite state changes)
   if (statusLabel && vrm) {
@@ -1973,6 +2051,7 @@ if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = loadVoices;
 function stopSpeaking() {
   speakToken++;
   if (window.speechSynthesis) window.speechSynthesis.cancel();
+  animator.setVisemeGate(false);   // mouth shut when speech is cut off
   setAvatarState('idle');
 }
 
@@ -1990,7 +2069,7 @@ function speak(text, emotion = 'calm') {
   let i = 0;
   const speakNext = () => {
     if (myToken !== speakToken) return;          // a newer message took over
-    if (i >= chunks.length) { setAvatarState('idle'); return; }
+    if (i >= chunks.length) { setAvatarState('idle'); animator.setVisemeGate(false); return; }
     const chunk = chunks[i++].trim();
     if (!chunk) { speakNext(); return; }
     const utter = new SpeechSynthesisUtterance(chunk);
@@ -2001,16 +2080,18 @@ function speak(text, emotion = 'calm') {
     utter.volume = 1.0;
     utter.onstart = () => {
       setAvatarState('speaking');
+      animator.setVisemeGate(true);                     // mouth on for this chunk
       scheduleBeat(2 + Math.floor(Math.random() * 3));   // hand beats sprinkled across this chunk
     };
     utter.onboundary = (ev) => {                       // real word boundaries — mouth opens only while a word is spoken
       if (ev.name === undefined || ev.name === 'word') {
         mouthGateAt = performance.now() + 160 + Math.random() * 90;
+        animator.setVisemeGate(true);
         if (Math.random() < 0.13) fireGesture('beat', { energy: 0.4 + Math.random() * 0.5 });
       }
     };
     utter.onend = speakNext;
-    utter.onerror = () => setAvatarState('idle');
+    utter.onerror = () => { animator.setVisemeGate(false); setAvatarState('idle'); };
     window.speechSynthesis.speak(utter);
   };
   speakNext();
@@ -2066,7 +2147,8 @@ async function sendMessage() {
     const data = await res.json();
     addMessage(data.reply || '(no reply)', 'vesper');
     performEmotion(data.emotion || 'calm');   // body language starts with the reply, voice follows
-    speak(data.reply || '', data.emotion || 'calm');
+    // TTS + lip sync get ONLY the Spoken Summary; the full answer stays in the chat UI
+    speak(data.spoken || data.reply || '', data.emotion || 'calm');
   } catch (err) {
     addMessage(`Connection error: ${err}`, 'vesper');
     flashEmotion('surprised');
@@ -2091,7 +2173,7 @@ fileInput.addEventListener('change', async () => {
     const data = await res.json();
     addMessage(data.reply, 'vesper');
     performEmotion(data.emotion || 'calm');
-    speak(data.reply, data.emotion || 'calm');
+    speak(data.spoken || data.reply, data.emotion || 'calm');   // voice = summary only
   } catch (err) {
     addMessage(`Upload error: ${err}`, 'vesper');
     flashEmotion('surprised');
