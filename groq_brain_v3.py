@@ -31,6 +31,9 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 BRAIN_MODEL = "openai/gpt-oss-120b"
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+OLLAMA_API_URL = "http://localhost:11434/v1/chat/completions"
+OLLAMA_MODEL = "llama3.2:3b"
 FIREBASE_URL = os.environ.get("FIREBASE_URL", "https://jarvis-3d95d-default-rtdb.firebaseio.com")
 
 # ══════════════════════════════════════════
@@ -975,7 +978,7 @@ def read_text_file(path, max_chars=8000):
     return None
 
 def think_with_image(user_input, image_path, mime_type='image/jpeg'):
-    """Send an image + question to a vision-capable model. Groq first, OpenRouter fallback."""
+    """Send an image + question to a vision-capable model. Groq first, OpenRouter fallback, Ollama last."""
     save_conversation('user', f"{user_input} [image: {os.path.basename(image_path)}]")
     history = load_recent_context()
     full_system = build_system_prompt()
@@ -998,13 +1001,18 @@ def think_with_image(user_input, image_path, mime_type='image/jpeg'):
         if OPENROUTER_API_KEY:
             providers.append(("OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
                               OPENROUTER_API_KEY, "meta-llama/llama-4-scout"))
+        # Ollama local — no API key needed, tried last
+        providers.append(("Ollama", OLLAMA_API_URL, None, OLLAMA_MODEL))
 
         last_error = None
         for name, url, key, model in providers:
             try:
+                headers = {"Content-Type": "application/json"}
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
                 response = _session.post(
                     url,
-                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    headers=headers,
                     json={"model": model, "messages": messages},
                     timeout=60
                 )
@@ -1020,8 +1028,6 @@ def think_with_image(user_input, image_path, mime_type='image/jpeg'):
                 last_error = f"{name}: max retries exceeded ({e})"
             except Exception as e:
                 last_error = f"{name}: {e}"
-        if not providers:
-            return "No vision provider configured. Add OPENROUTER_API_KEY to .env for image understanding."
         return f"Vision unavailable ({last_error}). Text chat still works."
     except Exception as e:
         return f"Vision error: {e}"
@@ -1052,37 +1058,47 @@ def think(user_input):
     save_conversation('user', user_input)
     history = load_recent_context()
     full_system = build_system_prompt()
-    if not GROQ_API_KEY:
-        return "GROQ_API_KEY not set. Add it to .env"
-    try:
-        response = _session.post(
-            GROQ_API_URL,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": BRAIN_MODEL,
-                "messages": [
-                    {"role": "system", "content": full_system},
-                    *history,
-                    {"role": "user", "content": user_input}
-                ]
-            },
-            timeout=30
-        )
-        data = response.json()
-        if 'choices' not in data:
-            return f"API error: {data}"
-        reply = data['choices'][0]['message']['content']
-        globals()['LAST_EMO'] = 'calm'
-        reply = parse_and_save_tags(reply)
-        save_conversation('assistant', reply)
-        return reply
-    except requests.exceptions.RetryError as e:
-        return f"Brain error: max retries exceeded ({e})"
-    except Exception as e:
-        return f"Brain error: {e}"
+
+    providers = []
+    if GROQ_API_KEY:
+        providers.append(("Groq", GROQ_API_URL, GROQ_API_KEY, BRAIN_MODEL))
+    if OPENROUTER_API_KEY:
+        providers.append(("OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
+                          OPENROUTER_API_KEY, BRAIN_MODEL))
+    # Ollama local — no API key needed, tried last
+    providers.append(("Ollama", OLLAMA_API_URL, None, OLLAMA_MODEL))
+
+    messages = [
+        {"role": "system", "content": full_system},
+        *history,
+        {"role": "user", "content": user_input}
+    ]
+
+    last_error = None
+    for name, url, key, model in providers:
+        try:
+            headers = {"Content-Type": "application/json"}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            response = _session.post(
+                url,
+                headers=headers,
+                json={"model": model, "messages": messages},
+                timeout=30
+            )
+            data = response.json()
+            if 'choices' in data:
+                reply = data['choices'][0]['message']['content']
+                globals()['LAST_EMO'] = 'calm'
+                reply = parse_and_save_tags(reply)
+                save_conversation('assistant', reply)
+                return reply
+            last_error = f"{name}: {data.get('error', {}).get('message', data)}"
+        except requests.exceptions.RetryError as e:
+            last_error = f"{name}: max retries exceeded ({e})"
+        except Exception as e:
+            last_error = f"{name}: {e}"
+    return f"Brain error: all providers failed ({last_error})"
 
 def startup_briefing():
     migrate_firebase_once()
