@@ -1,4 +1,15 @@
+# Core
 requests
 python-dotenv
 flask
-pypdf  # optional — enables PDF reading for uploads
+pypdf  # PDF reading for uploads
+
+# Web server (optional, for production)
+gunicorn
+
+# Image processing (optional, for vision features)
+pillow
+
+# Development
+pytest
+black

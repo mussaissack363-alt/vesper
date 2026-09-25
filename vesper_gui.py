@@ -74,9 +74,12 @@ send_btn.pack(side=tk.RIGHT)
 
 append_text(f"Vesper online ({DEVICE_TYPE.upper()}).\n\n")
 
-migrate_firebase_once()
-mem_count_result = handle_memory_command("what do you remember")
-if mem_count_result:
-    append_text(mem_count_result + "\n\n")
+def on_start():
+    migrate_firebase_once()
+    mem_count_result = handle_memory_command("what do you remember")
+    if mem_count_result:
+        append_text(mem_count_result + "\n\n")
+
+root.after(100, on_start)
 
 root.mainloop()

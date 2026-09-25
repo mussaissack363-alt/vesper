@@ -7,16 +7,31 @@ import subprocess
 import webbrowser
 import platform
 import sqlite3
-from dotenv import load_dotenv
 from datetime import datetime, date
+from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
+
+# HTTP session with retry/backoff
+_retry = Retry(
+    total=3,
+    backoff_factor=1.0,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["POST"],
+    raise_on_status=False,
+)
+_adapter = HTTPAdapter(max_retries=_retry)
+_session = requests.Session()
+_session.mount("https://", _adapter)
+_session.mount("http://", _adapter)
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 BRAIN_MODEL = "openai/gpt-oss-120b"
-FIREBASE_URL = "https://jarvis-3d95d-default-rtdb.firebaseio.com"
+FIREBASE_URL = os.environ.get("FIREBASE_URL", "https://jarvis-3d95d-default-rtdb.firebaseio.com")
 
 # ══════════════════════════════════════════
 # DEVICE DETECTION
@@ -987,7 +1002,7 @@ def think_with_image(user_input, image_path, mime_type='image/jpeg'):
         last_error = None
         for name, url, key, model in providers:
             try:
-                response = requests.post(
+                response = _session.post(
                     url,
                     headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
                     json={"model": model, "messages": messages},
@@ -1001,6 +1016,8 @@ def think_with_image(user_input, image_path, mime_type='image/jpeg'):
                     save_conversation('assistant', reply)
                     return reply
                 last_error = f"{name}: {data.get('error', {}).get('message', data)}"
+            except requests.exceptions.RetryError as e:
+                last_error = f"{name}: max retries exceeded ({e})"
             except Exception as e:
                 last_error = f"{name}: {e}"
         if not providers:
@@ -1035,8 +1052,10 @@ def think(user_input):
     save_conversation('user', user_input)
     history = load_recent_context()
     full_system = build_system_prompt()
+    if not GROQ_API_KEY:
+        return "GROQ_API_KEY not set. Add it to .env"
     try:
-        response = requests.post(
+        response = _session.post(
             GROQ_API_URL,
             headers={
                 "Authorization": f"Bearer {GROQ_API_KEY}",
@@ -1060,6 +1079,8 @@ def think(user_input):
         reply = parse_and_save_tags(reply)
         save_conversation('assistant', reply)
         return reply
+    except requests.exceptions.RetryError as e:
+        return f"Brain error: max retries exceeded ({e})"
     except Exception as e:
         return f"Brain error: {e}"
 
@@ -1078,6 +1099,11 @@ def startup_briefing():
 # ══════════════════════════════════════════
 
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "migrate":
+        migrate_firebase_once()
+        print("Migration complete.")
+        sys.exit(0)
     startup_briefing()
     while True:
         try:

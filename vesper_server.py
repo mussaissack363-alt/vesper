@@ -1,6 +1,8 @@
 import os
 import json
 import datetime
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask, request, jsonify, send_from_directory
 
 from groq_brain_v3 import (
@@ -26,6 +28,9 @@ def _fallback_emotion(text):
     return 'calm'
 
 app = Flask(__name__, static_folder='static', static_url_path='')
+
+# Thread pool for blocking LLM calls
+_executor = ThreadPoolExecutor(max_workers=4)
 
 
 @app.after_request
@@ -94,9 +99,11 @@ def chat():
         if result:
             return jsonify({'reply': result, 'spoken': result, 'emotion': _fallback_emotion(result)})
 
-    reply = think(user_input)
+    # Run think() in thread pool to avoid blocking Flask
+    future = _executor.submit(think, user_input)
+    reply = future.result(timeout=60)
     emo = last_emotion() if reply and not reply.startswith(('API error', 'Brain error')) else _fallback_emotion(reply)
-    spoken, _ = split_spoken_reply(reply)   # TTS gets only the summary; UI renders everything
+    spoken, _ = split_spoken_reply(reply)
     return jsonify({'reply': reply, 'spoken': spoken, 'emotion': emo})
 
 
@@ -115,7 +122,8 @@ def upload():
     # Images → vision model
     if ext in IMAGE_EXTENSIONS:
         mime = 'image/png' if ext == '.png' else 'image/jpeg' if ext in ('.jpg', '.jpeg') else 'image/webp' if ext == '.webp' else 'image/gif'
-        reply = think_with_image(question, path, mime)
+        future = _executor.submit(think_with_image, question, path, mime)
+        reply = future.result(timeout=90)
         emo = last_emotion() if reply and not reply.startswith(('API error', 'Vision error', 'Vision unavailable')) else _fallback_emotion(reply)
         spoken, _ = split_spoken_reply(reply)
         return jsonify({'reply': reply, 'spoken': spoken, 'emotion': emo})
@@ -124,7 +132,8 @@ def upload():
     content = read_text_file(path)
     if content:
         prompt = question or f"I uploaded the file '{f.filename}'. Here is its content:\n\n{content}\n\nSummarize it and tell me what matters."
-        reply = think(prompt)
+        future = _executor.submit(think, prompt)
+        reply = future.result(timeout=60)
         emo = last_emotion() if reply and not reply.startswith(('API error', 'Brain error')) else _fallback_emotion(reply)
         spoken, _ = split_spoken_reply(reply)
         return jsonify({'reply': reply, 'spoken': spoken, 'emotion': emo})
